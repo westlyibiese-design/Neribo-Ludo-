@@ -10,6 +10,15 @@ object Palette {
     val Red = Swatch(Color(0xFFF06B60), Color(0xFFD6362F), Color(0xFF9B201B))
     val Blue = Swatch(Color(0xFF619EF2), Color(0xFF2D74D5), Color(0xFF1B4E9A))
 
+    val Orange = Swatch(Color(0xFFFFA95C), Color(0xFFF06B1C), Color(0xFFB4410A))
+
+    val PillLight = Color(0xFF15494A)
+    val PillDark = Color(0xFF0B2E2F)
+    val PillEdge = Color(0x40FFFFFF)
+
+    val WoodLight = Color(0xFF64452B)
+    val WoodDark = Color(0xFF3F2916)
+
     val Cream = Color(0xFFF5F2E9)
     val CreamLight = Color(0xFFFCFAF4)
     val GridLine = Color(0xFFCDC7B6)

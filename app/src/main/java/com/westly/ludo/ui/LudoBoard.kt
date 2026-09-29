@@ -14,6 +14,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 
 /**
  * Static Ludo board (15x15 grid) with two dice in the center.
@@ -26,9 +32,10 @@ fun LudoBoard(
     leftDie: Int = 3,
     rightDie: Int = 4
 ) {
+    val measurer = rememberTextMeasurer()
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
         val side = minOf(maxWidth, maxHeight)
-        Canvas(Modifier.size(side)) { drawLudoBoard(leftDie, rightDie) }
+        Canvas(Modifier.size(side)) { drawLudoBoard(leftDie, rightDie, measurer) }
     }
 }
 
@@ -54,7 +61,7 @@ private val coloredCells: Map<Pair<Int, Int>, Swatch> = buildMap<Pair<Int, Int>,
     put(8 to 13, Palette.Blue)
 }
 
-private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int) {
+private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int, measurer: TextMeasurer) {
     val s = size.minDimension
     val pad = s * 0.012f
     val fs = s - 2f * pad
@@ -69,7 +76,7 @@ private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int) {
     drawRoundRect(Palette.Cream, Offset(m.ox, m.oy), Size(boardSide, boardSide), boardCorner)
 
     drawPathCells(m)
-    drawYards(m)
+    drawYards(m, measurer)
     drawCenter(m)
     drawPathArrows(m)
 
@@ -155,14 +162,21 @@ private fun DrawScope.drawPathCells(m: Metrics) {
     }
 }
 
-private fun DrawScope.drawYards(m: Metrics) {
-    drawYard(m, 0, 0, Palette.Green)
-    drawYard(m, 0, 9, Palette.Yellow)
-    drawYard(m, 9, 0, Palette.Red)
-    drawYard(m, 9, 9, Palette.Blue)
+private fun DrawScope.drawYards(m: Metrics, measurer: TextMeasurer) {
+    drawYard(m, 0, 0, Palette.Green, "Player 2", measurer)
+    drawYard(m, 0, 9, Palette.Yellow, "Player 1", measurer)
+    drawYard(m, 9, 0, Palette.Red, "Player 1", measurer)
+    drawYard(m, 9, 9, Palette.Blue, "Player 2", measurer)
 }
 
-private fun DrawScope.drawYard(m: Metrics, row: Int, col: Int, sw: Swatch) {
+private fun DrawScope.drawYard(
+    m: Metrics,
+    row: Int,
+    col: Int,
+    sw: Swatch,
+    label: String,
+    measurer: TextMeasurer
+) {
     val c = m.cell
     val tl = Offset(m.x(col.toFloat()), m.y(row.toFloat()))
     val yardSize = Size(c * 6f, c * 6f)
@@ -209,6 +223,26 @@ private fun DrawScope.drawYard(m: Metrics, row: Int, col: Int, sw: Swatch) {
             drawSeed(tl + Offset(c * dx, c * dy), c * 0.66f, sw)
         }
     }
+
+    // Player name in the top band of the yard
+    val layout = measurer.measure(
+        text = label,
+        style = TextStyle(
+            color = Color.White,
+            fontSize = (c * 0.58f).toSp(),
+            fontWeight = FontWeight.ExtraBold,
+            shadow = Shadow(Color.Black.copy(alpha = 0.45f), Offset(0f, c * 0.03f), c * 0.06f)
+        ),
+        maxLines = 1,
+        softWrap = false
+    )
+    drawText(
+        textLayoutResult = layout,
+        topLeft = Offset(
+            tl.x + c * 3f - layout.size.width / 2f,
+            tl.y + c * 0.5f - layout.size.height / 2f
+        )
+    )
 }
 
 private fun DrawScope.drawSeed(center: Offset, r: Float, sw: Swatch) {
