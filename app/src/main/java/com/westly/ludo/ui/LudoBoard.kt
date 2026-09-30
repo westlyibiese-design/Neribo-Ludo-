@@ -454,13 +454,13 @@ private fun DrawScope.drawPieceLayer(pieces: List<PieceView>, pulse: Float, roll
 }
 
 private fun DrawScope.drawGlow(c: Offset, r: Float, pulse: Float) {
-    val a = 0.45f + 0.4f * pulse
-    val gr = r * (1.45f + 0.25f * pulse)
+    // Soft warm halo so the seed stands out from its surroundings.
+    val gr = r * (2.1f + 0.35f * pulse)
     drawCircle(
         Brush.radialGradient(
             listOf(
-                Color.White.copy(alpha = a),
-                Color(0xFFFFF3B0).copy(alpha = a * 0.6f),
+                Color(0xFFFFF3B0).copy(alpha = 0.85f),
+                Color(0xFFFFF3B0).copy(alpha = 0.35f),
                 Color.Transparent
             ),
             center = c,
@@ -469,10 +469,18 @@ private fun DrawScope.drawGlow(c: Offset, r: Float, pulse: Float) {
         radius = gr,
         center = c
     )
+    // Dark outline + bright white ring: readable on the white track and on every yard colour.
+    val ringR = r * (1.3f + 0.1f * pulse)
     drawCircle(
-        Color.White.copy(alpha = 0.55f + 0.4f * pulse),
-        radius = r * 1.12f,
+        Color(0xFF0E1A22).copy(alpha = 0.7f),
+        radius = ringR,
         center = c,
-        style = Stroke(r * 0.12f)
+        style = Stroke(r * 0.42f)
+    )
+    drawCircle(
+        Color.White.copy(alpha = 0.8f + 0.2f * pulse),
+        radius = ringR,
+        center = c,
+        style = Stroke(r * 0.22f)
     )
 }
