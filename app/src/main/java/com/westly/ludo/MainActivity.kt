@@ -149,9 +149,9 @@ fun LudoScreen() {
                 }
                 Spacer(Modifier.height(u * 2f))
                 TurnPill(
-                    if (over) "Player ${game.winner + 1} Wins!" else "Your Turn",
+                    if (over) "Player ${game.winner + 1} Wins!" else "Player ${game.activePlayer + 1} Turn",
                     u,
-                    textScale = if (over) 0.72f else 1f
+                    textScale = 0.75f
                 )
             }
         }

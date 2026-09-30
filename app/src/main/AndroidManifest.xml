@@ -3,7 +3,7 @@
     <application
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="Ludo"
+        android:label="LudoMate"
         android:theme="@style/Theme.Ludo">
         <activity
             android:name=".MainActivity"
