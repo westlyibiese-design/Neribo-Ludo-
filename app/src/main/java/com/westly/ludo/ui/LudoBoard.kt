@@ -1,9 +1,13 @@
 package com.westly.ludo.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -14,35 +18,87 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 
+/** One piece to draw. Positions are in board grid units (row, col), radius in cells. */
+class PieceView(
+    val swatch: Swatch,
+    val row: Float,
+    val col: Float,
+    val radius: Float,
+    val glow: Boolean,
+    val lift: Float = 0f,
+    val tag: Any? = null
+)
+
 /**
- * Static Ludo board (15x15 grid) with two dice in the center.
+ * Ludo board (15x15 grid) with two dice in the center.
  * Fits the largest square inside the space it is given and centers itself,
  * so it can be dropped into any layout later.
+ *
+ * Phase 3: pass [pieces] to draw live pieces (the yard seeds are then drawn from
+ * the pieces). Leave it null for the static Phase 2 look.
  */
 @Composable
 fun LudoBoard(
     modifier: Modifier = Modifier,
     leftDie: Int = 3,
-    rightDie: Int = 4
+    rightDie: Int = 4,
+    pieces: (() -> List<PieceView>)? = null,
+    pulse: () -> Float = { 0f },
+    rollHint: Boolean = false,
+    onBoardTap: ((row: Float, col: Float) -> Unit)? = null
 ) {
     val measurer = rememberTextMeasurer()
+    val tapHandler = rememberUpdatedState(onBoardTap)
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
         val side = minOf(maxWidth, maxHeight)
-        Canvas(Modifier.size(side)) { drawLudoBoard(leftDie, rightDie, measurer) }
+        Box(
+            Modifier
+                .size(side)
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { pos ->
+                        val handler = tapHandler.value
+                        if (handler != null) {
+                            val m = boardMetrics(size.width.toFloat())
+                            handler((pos.y - m.oy) / m.cell, (pos.x - m.ox) / m.cell)
+                        }
+                    })
+                }
+        ) {
+            // The static board sits on its own layer so it is not redrawn while pieces move.
+            Canvas(Modifier.fillMaxSize().graphicsLayer { }) {
+                drawLudoBoard(leftDie, rightDie, measurer, pieces == null)
+            }
+            if (pieces != null) {
+                Canvas(Modifier.fillMaxSize()) {
+                    drawPieceLayer(pieces(), pulse(), rollHint)
+                }
+            }
+        }
     }
 }
 
-private class Metrics(val ox: Float, val oy: Float, val cell: Float) {
+internal class Metrics(val ox: Float, val oy: Float, val cell: Float) {
     fun x(col: Float) = ox + col * cell
     fun y(row: Float) = oy + row * cell
     fun center(row: Int, col: Int) = Offset(x(col + 0.5f), y(row + 0.5f))
+}
+
+/** Same numbers as drawLudoBoard uses, so taps and pieces line up with the drawing. */
+internal fun boardMetrics(s: Float): Metrics {
+    val pad = s * 0.012f
+    val fs = s - 2f * pad
+    val frame = fs * 0.024f
+    val cell = (fs - 2f * frame) / 15f
+    return Metrics(pad + frame, pad + frame, cell)
 }
 
 // Colored path cells: five home-column cells per arm plus one start cell per color.
@@ -61,7 +117,7 @@ private val coloredCells: Map<Pair<Int, Int>, Swatch> = buildMap<Pair<Int, Int>,
     put(8 to 13, Palette.Blue)
 }
 
-private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int, measurer: TextMeasurer) {
+private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int, measurer: TextMeasurer, seeds: Boolean) {
     val s = size.minDimension
     val pad = s * 0.012f
     val fs = s - 2f * pad
@@ -76,7 +132,7 @@ private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int, measurer: TextM
     drawRoundRect(Palette.Cream, Offset(m.ox, m.oy), Size(boardSide, boardSide), boardCorner)
 
     drawPathCells(m)
-    drawYards(m, measurer)
+    drawYards(m, measurer, seeds)
     drawCenter(m)
     drawPathArrows(m)
 
@@ -162,11 +218,11 @@ private fun DrawScope.drawPathCells(m: Metrics) {
     }
 }
 
-private fun DrawScope.drawYards(m: Metrics, measurer: TextMeasurer) {
-    drawYard(m, 0, 0, Palette.Green, "Player 2", measurer)
-    drawYard(m, 0, 9, Palette.Yellow, "Player 1", measurer)
-    drawYard(m, 9, 0, Palette.Red, "Player 1", measurer)
-    drawYard(m, 9, 9, Palette.Blue, "Player 2", measurer)
+private fun DrawScope.drawYards(m: Metrics, measurer: TextMeasurer, seeds: Boolean) {
+    drawYard(m, 0, 0, Palette.Green, "Player 2", measurer, seeds)
+    drawYard(m, 0, 9, Palette.Yellow, "Player 1", measurer, seeds)
+    drawYard(m, 9, 0, Palette.Red, "Player 1", measurer, seeds)
+    drawYard(m, 9, 9, Palette.Blue, "Player 2", measurer, seeds)
 }
 
 private fun DrawScope.drawYard(
@@ -175,7 +231,8 @@ private fun DrawScope.drawYard(
     col: Int,
     sw: Swatch,
     label: String,
-    measurer: TextMeasurer
+    measurer: TextMeasurer,
+    seeds: Boolean
 ) {
     val c = m.cell
     val tl = Offset(m.x(col.toFloat()), m.y(row.toFloat()))
@@ -218,9 +275,11 @@ private fun DrawScope.drawYard(
     drawRoundRect(Color.Black.copy(alpha = 0.22f), plateTl, plateSize, plateCorner, style = Stroke(c * 0.05f))
 
     // Four seeds resting in the yard
-    for (dx in listOf(2f, 4f)) {
-        for (dy in listOf(2f, 4f)) {
-            drawSeed(tl + Offset(c * dx, c * dy), c * 0.66f, sw)
+    if (seeds) {
+        for (dx in listOf(2f, 4f)) {
+            for (dy in listOf(2f, 4f)) {
+                drawSeed(tl + Offset(c * dx, c * dy), c * 0.66f, sw)
+            }
         }
     }
 
@@ -369,4 +428,51 @@ private fun DrawScope.drawArrow(center: Offset, dir: Offset, c: Float, both: Boo
         val base = head(center + dir * (c * 0.32f), dir)
         drawLine(Palette.Arrow, tail, base, strokeWidth = shaftW)
     }
+}
+
+/** Live pieces, drawn above the static board. */
+private fun DrawScope.drawPieceLayer(pieces: List<PieceView>, pulse: Float, rollHint: Boolean) {
+    val m = boardMetrics(size.minDimension)
+
+    if (rollHint) {
+        // Soft pulsing frame around the dice: tap them to roll.
+        drawRoundRect(
+            Color.White.copy(alpha = 0.35f + 0.5f * pulse),
+            Offset(m.x(6.1f), m.y(6.8f)),
+            Size(m.cell * 2.8f, m.cell * 1.4f),
+            CornerRadius(m.cell * 0.3f),
+            style = Stroke(m.cell * 0.08f)
+        )
+    }
+
+    for (pv in pieces) {
+        val r = pv.radius * m.cell
+        val c = Offset(m.x(pv.col), m.y(pv.row) - pv.lift * m.cell * 0.22f)
+        if (pv.glow) drawGlow(c, r, pulse)
+        drawSeed(c, r * (1f + 0.18f * pv.lift), pv.swatch)
+    }
+}
+
+private fun DrawScope.drawGlow(c: Offset, r: Float, pulse: Float) {
+    val a = 0.45f + 0.4f * pulse
+    val gr = r * (1.45f + 0.25f * pulse)
+    drawCircle(
+        Brush.radialGradient(
+            listOf(
+                Color.White.copy(alpha = a),
+                Color(0xFFFFF3B0).copy(alpha = a * 0.6f),
+                Color.Transparent
+            ),
+            center = c,
+            radius = gr
+        ),
+        radius = gr,
+        center = c
+    )
+    drawCircle(
+        Color.White.copy(alpha = 0.55f + 0.4f * pulse),
+        radius = r * 1.12f,
+        center = c,
+        style = Stroke(r * 0.12f)
+    )
 }

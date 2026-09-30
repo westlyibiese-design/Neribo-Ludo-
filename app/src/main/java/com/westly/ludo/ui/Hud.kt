@@ -70,8 +70,8 @@ fun PlayerBadge(name: String, score: Int, unit: Dp, modifier: Modifier = Modifie
 }
 
 @Composable
-fun TurnPill(text: String, unit: Dp, modifier: Modifier = Modifier) {
-    Pill(text, unit * 5.4f, modifier.width(unit * 41f).height(unit * 9.3f))
+fun TurnPill(text: String, unit: Dp, modifier: Modifier = Modifier, textScale: Float = 1f) {
+    Pill(text, unit * 5.4f * textScale, modifier.width(unit * 41f).height(unit * 9.3f))
 }
 
 internal fun DrawScope.drawGlossyDisc(c: Offset, r: Float, sw: Swatch) {
