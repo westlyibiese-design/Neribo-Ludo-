@@ -1,5 +1,6 @@
 package com.westly.ludo
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -46,10 +47,29 @@ import kotlin.math.sin
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private val game = LudoGame()
+
+    private fun prefs() = getSharedPreferences("ludomate", Context.MODE_PRIVATE)
+
+    private fun saveGame() {
+        prefs().edit().putString("save", game.toSaveString()).apply()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { LudoScreen() }
+        prefs().getString("save", null)?.let { game.restore(it) }
+        setContent { LudoScreen(game) }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        saveGame()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        saveGame()
     }
 }
 
@@ -59,8 +79,7 @@ class MainActivity : ComponentActivity() {
  * scales with the device.
  */
 @Composable
-fun LudoScreen() {
-    val game = remember { LudoGame() }
+fun LudoScreen(game: LudoGame) {
     val scope = rememberCoroutineScope()
 
     // Soft 0..1 pulse used by the glowing pieces and the dice hint.

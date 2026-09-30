@@ -16,6 +16,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 import kotlinx.coroutines.delay
+import org.json.JSONArray
+import org.json.JSONObject
 
 enum class Phase { AwaitRoll, Rolling, Choose, Moving, Pausing, GameOver }
 
@@ -52,6 +54,7 @@ class LudoGame {
     private var movingPiece by mutableStateOf<Piece?>(null)
     private var moveProgress by mutableFloatStateOf(0f)
     private var movedThisRoll = false
+    private var moveTo = 0
 
     private fun colorsOf(player: Int): List<LudoColor> =
         if (player == 0) listOf(LudoColor.YELLOW, LudoColor.RED)
@@ -86,6 +89,99 @@ class LudoGame {
         if (i < 0 || dieUsed(i)) return false
         if (piece.color !in colorsOf(activePlayer)) return false
         return canMove(piece, dieValue(i))
+    }
+
+    /** Everything needed to continue the game later, as text. */
+    fun toSaveString(): String {
+        val o = JSONObject()
+        val arr = JSONArray()
+        val mp = movingPiece
+        for (p in pieces) {
+            // A piece caught mid-move is saved at the cell it was moving to.
+            val prog = if (phase == Phase.Moving && p === mp) moveTo else p.progress
+            arr.put(JSONArray().put(prog).put(p.finishRank))
+        }
+        o.put("pieces", arr)
+        o.put(
+            "phase",
+            when (phase) {
+                Phase.AwaitRoll, Phase.Rolling -> "AwaitRoll"
+                Phase.Choose -> "Choose"
+                Phase.GameOver -> "GameOver"
+                Phase.Moving, Phase.Pausing -> "Resolve"
+            }
+        )
+        o.put("activePlayer", activePlayer)
+        o.put("winner", winner)
+        o.put("die1", die1)
+        o.put("die2", die2)
+        o.put("used1", used1)
+        o.put("used2", used2)
+        o.put("selectedDie", selectedDie)
+        o.put("face1", face1)
+        o.put("face2", face2)
+        o.put("movedThisRoll", movedThisRoll)
+        return o.toString()
+    }
+
+    /** Loads a saved game. Returns false (and starts fresh) if the save is unreadable. */
+    fun restore(json: String): Boolean {
+        return try {
+            val o = JSONObject(json)
+            val arr = o.getJSONArray("pieces")
+            if (arr.length() != pieces.size) {
+                newGame()
+                return false
+            }
+            for ((i, p) in pieces.withIndex()) {
+                val a = arr.getJSONArray(i)
+                p.progress = a.getInt(0)
+                p.finishRank = a.getInt(1)
+            }
+            movingPiece = null
+            activePlayer = o.getInt("activePlayer")
+            winner = o.getInt("winner")
+            die1 = o.getInt("die1")
+            die2 = o.getInt("die2")
+            used1 = o.getBoolean("used1")
+            used2 = o.getBoolean("used2")
+            selectedDie = o.getInt("selectedDie")
+            face1 = o.getInt("face1")
+            face2 = o.getInt("face2")
+            movedThisRoll = o.getBoolean("movedThisRoll")
+            when (o.getString("phase")) {
+                "GameOver" -> phase = Phase.GameOver
+                "AwaitRoll" -> phase = Phase.AwaitRoll
+                else -> resumeTurn()
+            }
+            true
+        } catch (e: Exception) {
+            newGame()
+            false
+        }
+    }
+
+    /** Works out where a restored mid-turn game should continue, without any waiting. */
+    private fun resumeTurn() {
+        if (ownPieces().all { it.progress == Route.CENTER }) {
+            winner = activePlayer
+            phase = Phase.GameOver
+            return
+        }
+        val usable = usableDice()
+        if (usable.isNotEmpty()) {
+            if (selectedDie !in usable) selectedDie = usable.first()
+            phase = Phase.Choose
+            return
+        }
+        val extraRoll = die1 == 6 && die2 == 6
+        die1 = 0
+        die2 = 0
+        used1 = false
+        used2 = false
+        selectedDie = -1
+        if (!extraRoll) activePlayer = 1 - activePlayer
+        phase = Phase.AwaitRoll
     }
 
     fun newGame() {
@@ -169,6 +265,7 @@ class LudoGame {
 
         val from = piece.progress
         val to = if (from == Route.IN_HOUSE) 0 else from + d
+        moveTo = to
         if (to == Route.CENTER) {
             piece.finishRank = pieces.count { it.color == piece.color && it.finishRank >= 0 }
         }
