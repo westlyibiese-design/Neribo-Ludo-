@@ -32,6 +32,8 @@ class Piece(val color: LudoColor, val slot: Int) {
 class LudoGame {
     val pieces: List<Piece> = LudoColor.values().flatMap { c -> (0..3).map { Piece(c, it) } }
 
+    private val sounds = Sounds()
+
     var phase by mutableStateOf(Phase.AwaitRoll)
     var activePlayer by mutableIntStateOf(0)
     var winner by mutableIntStateOf(-1)
@@ -110,12 +112,14 @@ class LudoGame {
         repeat(9) {
             face1 = Random.nextInt(1, 7)
             face2 = Random.nextInt(1, 7)
+            sounds.roll()
             delay(60)
         }
         val a = Random.nextInt(1, 7)
         val b = Random.nextInt(1, 7)
         face1 = a
         face2 = b
+        sounds.land()
         die1 = a
         die2 = b
         used1 = false
@@ -175,6 +179,7 @@ class LudoGame {
         if (ownPieces().all { it.progress == Route.CENTER }) {
             winner = activePlayer
             phase = Phase.GameOver
+            sounds.win()
             return
         }
         afterDiceChange()
@@ -185,14 +190,23 @@ class LudoGame {
         moveProgress = from.toFloat()
         val steps = to - from
         val duration = if (from == Route.IN_HOUSE) 400f else steps * 190f
+        if (from == Route.IN_HOUSE) sounds.out()
+        var lastCell = from
         val startNanos = withFrameNanos { it }
         while (true) {
             val now = withFrameNanos { it }
             val t = ((now - startNanos) / 1_000_000f) / duration
             if (t >= 1f) break
             moveProgress = from + steps * t
+            val cell = floor(moveProgress).toInt()
+            if (cell != lastCell) {
+                lastCell = cell
+                if (from != Route.IN_HOUSE) sounds.tick()
+            }
         }
         moveProgress = to.toFloat()
+        if (to == Route.CENTER) sounds.finish()
+        else if (from != Route.IN_HOUSE) sounds.tick()
     }
 
     /** Called with a tap position in board grid units. */
