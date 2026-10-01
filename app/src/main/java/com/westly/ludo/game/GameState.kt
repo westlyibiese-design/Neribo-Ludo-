@@ -20,12 +20,15 @@ import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 
-enum class Phase { AwaitRoll, Rolling, Choose, Moving, Pausing, GameOver }
+enum class Phase { AwaitRoll, Rolling, Choose, Moving, Pausing, CaptureChoose, GameOver }
 
 class Piece(val color: LudoColor, val slot: Int) {
     /** -1 = in house, 0..55 = on the route, 56 = reached the center. */
     var progress by mutableIntStateOf(Route.IN_HOUSE)
     var finishRank by mutableIntStateOf(-1)
+
+    /** A winning seed: it reached the center, or it captured an opponent seed. */
+    var won by mutableStateOf(false)
 }
 
 /**
@@ -61,6 +64,14 @@ class LudoGame {
     private var movedThisRoll = false
     private var moveTo = 0
 
+    // Capture handling: the seed waiting for the player to choose which opponent to capture,
+    // and the captured seed that is currently travelling back to its house.
+    private var pendingMover by mutableStateOf<Piece?>(null)
+    private var returning by mutableStateOf<Piece?>(null)
+    private var retRow by mutableFloatStateOf(0f)
+    private var retCol by mutableFloatStateOf(0f)
+    private var retT by mutableFloatStateOf(0f)
+
     private fun colorsOf(player: Int): List<LudoColor> =
         if (player == 0) listOf(LudoColor.YELLOW, LudoColor.RED)
         else listOf(LudoColor.GREEN, LudoColor.BLUE)
@@ -95,14 +106,51 @@ class LudoGame {
         else -> die1 > 0 && die2 > 0 && !used1 && !used2
     }
 
+    /** Opponent seeds standing on a board cell. There are no safe cells. */
+    private fun opponentsAtCell(r: Int, c: Int): List<Piece> {
+        val mine = colorsOf(activePlayer)
+        return pieces.filter { q ->
+            q.color !in mine && q.progress in 0 until Route.CENTER && Route.cell(q.color, q.progress) == (r to c)
+        }
+    }
+
+    /** Opponent seeds on the cell where [mover] is standing now. */
+    private fun opponentsAt(mover: Piece): List<Piece> {
+        if (mover.progress !in 0 until Route.CENTER) return emptyList()
+        val (r, c) = Route.cell(mover.color, mover.progress)
+        return opponentsAtCell(r, c)
+    }
+
+    private fun landingOf(piece: Piece, d: Int): Int =
+        if (piece.progress == Route.IN_HOUSE) 0 else piece.progress + d
+
+    /**
+     * The 5 + 5 rule. A single die would stop on an opponent seed while the other die is still
+     * unused: the stop only counts as a capture if a DIFFERENT own seed can still use the other die.
+     * If none can, the seed may not stop there; it must carry on with the other die as well.
+     */
+    private fun forcedContinuation(piece: Piece, i: Int): Boolean {
+        if (i !in 0..1) return false
+        val other = 1 - i
+        if (!optionFresh(other)) return false
+        val land = landingOf(piece, optionValue(i))
+        if (land >= Route.CENTER) return false
+        val (r, c) = Route.cell(piece.color, land)
+        if (opponentsAtCell(r, c).isEmpty()) return false
+        val d2 = optionValue(other)
+        return ownPieces().none { it !== piece && canMove(it, d2) }
+    }
+
     /** Can this piece make the full move of option i? The total never brings a piece out of the house. */
     private fun canUse(piece: Piece, i: Int): Boolean {
         if (!optionFresh(i)) return false
         val d = optionValue(i)
-        return if (i == 2) {
-            piece.progress >= 0 && piece.progress < Route.CENTER && piece.progress + d <= Route.CENTER
-        } else {
-            canMove(piece, d)
+        return when {
+            i == 2 -> piece.progress >= 0 && piece.progress < Route.CENTER && piece.progress + d <= Route.CENTER
+            !canMove(piece, d) -> false
+            // Must carry on with the other die, so the whole combined move has to fit.
+            forcedContinuation(piece, i) -> landingOf(piece, d) + optionValue(1 - i) <= Route.CENTER
+            else -> true
         }
     }
 
@@ -130,7 +178,7 @@ class LudoGame {
         for (p in pieces) {
             // A piece caught mid-move is saved at the cell it was moving to.
             val prog = if (phase == Phase.Moving && p === mp) moveTo else p.progress
-            arr.put(JSONArray().put(prog).put(p.finishRank))
+            arr.put(JSONArray().put(prog).put(p.finishRank).put(if (p.won) 1 else 0))
         }
         o.put("pieces", arr)
         o.put(
@@ -139,9 +187,17 @@ class LudoGame {
                 Phase.AwaitRoll, Phase.Rolling -> "AwaitRoll"
                 Phase.Choose -> "Choose"
                 Phase.GameOver -> "GameOver"
+                Phase.CaptureChoose -> "Capture"
                 Phase.Moving, Phase.Pausing -> "Resolve"
             }
         )
+        // The seed whose landing has not been resolved yet (capture still to apply or to choose).
+        val pm = when (phase) {
+            Phase.CaptureChoose -> pendingMover
+            Phase.Moving -> mp
+            else -> null
+        }
+        o.put("pendingMover", if (pm == null) -1 else pieces.indexOf(pm))
         o.put("activePlayer", activePlayer)
         o.put("winner", winner)
         o.put("die1", die1)
@@ -168,8 +224,11 @@ class LudoGame {
                 val a = arr.getJSONArray(i)
                 p.progress = a.getInt(0)
                 p.finishRank = a.getInt(1)
+                p.won = (a.length() > 2 && a.getInt(2) == 1) || p.progress == Route.CENTER
             }
             movingPiece = null
+            pendingMover = null
+            returning = null
             pick = null
             activePlayer = o.getInt("activePlayer")
             winner = o.getInt("winner")
@@ -181,16 +240,31 @@ class LudoGame {
             face1 = o.getInt("face1")
             face2 = o.getInt("face2")
             movedThisRoll = o.getBoolean("movedThisRoll")
+            val pm = o.optInt("pendingMover", -1)
             when (o.getString("phase")) {
                 "GameOver" -> phase = Phase.GameOver
                 "AwaitRoll" -> phase = Phase.AwaitRoll
-                else -> resumeTurn()
+                else -> restorePending(if (pm >= 0) pieces.getOrNull(pm) else null)
             }
             true
         } catch (e: Exception) {
             newGame()
             false
         }
+    }
+
+    /** A restored game may still owe a capture on the cell where a seed had just landed. */
+    private fun restorePending(mover: Piece?) {
+        if (mover != null) {
+            val victims = opponentsAt(mover)
+            if (victims.size == 1) {
+                applyCapture(mover, victims[0])
+            } else if (victims.size > 1) {
+                openCaptureChoice(mover, victims)
+                return
+            }
+        }
+        resumeTurn()
     }
 
     /** Works out where a restored mid-turn game should continue, without any waiting. */
@@ -220,8 +294,11 @@ class LudoGame {
         for (p in pieces) {
             p.progress = Route.IN_HOUSE
             p.finishRank = -1
+            p.won = false
         }
         movingPiece = null
+        pendingMover = null
+        returning = null
         pick = null
         activePlayer = 0
         winner = -1
@@ -289,9 +366,22 @@ class LudoGame {
         selectedDie = i
     }
 
-    /** Called when the player picks one pawn in the same-spot popup. */
+    /**
+     * Called when the player taps a pawn in the popup: either which own seed to move
+     * (same-spot choice) or which opponent seed to capture.
+     */
     suspend fun onPiecePicked(tag: Any?) {
         val piece = tag as? Piece ?: return
+        if (phase == Phase.CaptureChoose) {
+            val mover = pendingMover ?: return
+            if (pick?.items?.any { it.tag === piece } != true) return
+            pick = null
+            pendingMover = null
+            phase = Phase.Moving
+            capture(mover, piece)
+            finishMove()
+            return
+        }
         pick = null
         choosePiece(piece)
     }
@@ -303,23 +393,26 @@ class LudoGame {
     private suspend fun choosePiece(piece: Piece) {
         if (!isGlowing(piece)) return
         val dieIndex = selectedDie
-        val d = optionValue(dieIndex)
+        val base = optionValue(dieIndex)
+        // 5 + 5 rule: this seed may not stop on an opponent, so it also takes the other die.
+        val forced = dieIndex != 2 && forcedContinuation(piece, dieIndex)
+        val extra = if (forced) optionValue(1 - dieIndex) else 0
         phase = Phase.Moving
         pick = null
-        // The red total spends both dice at once; a single die spends only itself.
-        when (dieIndex) {
-            0 -> used1 = true
-            1 -> used2 = true
-            else -> {
+        // The red total and a forced continuation spend both dice; a single die spends only itself.
+        when {
+            dieIndex == 2 || forced -> {
                 used1 = true
                 used2 = true
             }
+            dieIndex == 0 -> used1 = true
+            else -> used2 = true
         }
         selectedDie = -1
         movedThisRoll = true
 
         val from = piece.progress
-        val to = if (from == Route.IN_HOUSE) 0 else from + d
+        val to = if (from == Route.IN_HOUSE) extra else from + base + extra
         moveTo = to
         if (to == Route.CENTER) {
             piece.finishRank = pieces.count { it.color == piece.color && it.finishRank >= 0 }
@@ -327,7 +420,19 @@ class LudoGame {
         animateMove(piece, from, to)
         piece.progress = to
         movingPiece = null
+        if (to == Route.CENTER) piece.won = true
 
+        // Capture is decided only where the move really ends.
+        val victims = opponentsAt(piece)
+        if (victims.size > 1) {
+            openCaptureChoice(piece, victims)   // the player picks which opponent seed
+            return
+        }
+        if (victims.size == 1) capture(piece, victims[0])
+        finishMove()
+    }
+
+    private suspend fun finishMove() {
         if (ownPieces().all { it.progress == Route.CENTER }) {
             winner = activePlayer
             phase = Phase.GameOver
@@ -337,11 +442,50 @@ class LudoGame {
         afterDiceChange()
     }
 
+    private fun openCaptureChoice(mover: Piece, victims: List<Piece>) {
+        val (r, c) = Route.cell(mover.color, mover.progress)
+        pendingMover = mover
+        pick = PiecePick(
+            r + 0.5f,
+            c + 0.5f,
+            victims.sortedBy { it.color.ordinal * 4 + it.slot }
+                .map { PieceView(swatchOf(it.color), r + 0.5f, c + 0.5f, BOARD_R, false, 0f, it) },
+            true
+        )
+        phase = Phase.CaptureChoose
+    }
+
+    /** Sends the victim back to its own house; it needs a new 6 to come out. */
+    private fun applyCapture(mover: Piece, victim: Piece) {
+        victim.progress = Route.IN_HOUSE
+        victim.finishRank = -1
+        victim.won = false
+        mover.won = true
+    }
+
+    private suspend fun capture(mover: Piece, victim: Piece) {
+        val (vr, vc) = Route.anchor(victim.color, victim.slot, victim.finishRank, victim.progress)
+        returning = victim
+        retRow = vr
+        retCol = vc
+        retT = 0f
+        applyCapture(mover, victim)
+        sounds.land()
+        val start = withFrameNanos { it }
+        while (true) {
+            val now = withFrameNanos { it }
+            val t = ((now - start) / 1_000_000f) / 450f
+            if (t >= 1f) break
+            retT = t
+        }
+        returning = null
+    }
+
     private suspend fun animateMove(piece: Piece, from: Int, to: Int) {
         movingPiece = piece
         moveProgress = from.toFloat()
         val steps = to - from
-        val duration = if (from == Route.IN_HOUSE) 400f else steps * (if (steps > 6) 150f else 190f)
+        val duration = if (from == Route.IN_HOUSE) 400f + to * 170f else steps * (if (steps > 6) 150f else 190f)
         if (from == Route.IN_HOUSE) sounds.out()
         var lastCell = from
         val startNanos = withFrameNanos { it }
@@ -422,7 +566,7 @@ class LudoGame {
         val groups = HashMap<Int, MutableList<Piece>>()
 
         for (p in pieces) {
-            if (p === moving) continue
+            if (p === moving || p === returning) continue
             val pr = p.progress
             when {
                 pr < 0 -> {
@@ -461,7 +605,8 @@ class LudoGame {
                         isGlowing(p),
                         0f,
                         p,
-                        key
+                        key,
+                        p.won
                     )
                 )
             }
@@ -494,6 +639,22 @@ class LudoGame {
                     false,
                     hop,
                     moving
+                )
+            )
+        }
+        val ret = returning
+        if (ret != null) {
+            val t = retT
+            val (hr, hc) = Route.houseSpot(ret.color, ret.slot)
+            out.add(
+                PieceView(
+                    swatchOf(ret.color),
+                    lerp(retRow, hr, t),
+                    lerp(retCol, hc, t),
+                    lerp(BOARD_R, HOUSE_R, t),
+                    false,
+                    sin(PI.toFloat() * t),
+                    ret
                 )
             )
         }

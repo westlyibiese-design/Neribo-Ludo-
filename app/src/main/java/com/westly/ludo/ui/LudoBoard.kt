@@ -8,6 +8,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.text.BasicText
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalDensity
@@ -49,11 +53,13 @@ class PieceView(
     val lift: Float = 0f,
     val tag: Any? = null,
     /** Board cell id shared by pieces standing on the same cell; -1 for pieces in a house. */
-    val group: Int = -1
+    val group: Int = -1,
+    /** Winning seed: drawn with a small gold star. */
+    val won: Boolean = false
 )
 
 /** Pieces that can all make the chosen move from one spot; the player picks which one moves. */
-class PiecePick(val row: Float, val col: Float, val items: List<PieceView>)
+class PiecePick(val row: Float, val col: Float, val items: List<PieceView>, val capture: Boolean = false)
 
 /**
  * Ludo board (15x15 grid) with two dice in the center.
@@ -474,6 +480,7 @@ private fun DrawScope.drawPieceLayer(pieces: List<PieceView>, pulse: Float, roll
         val c = Offset(m.x(pv.col), m.y(pv.row) - pv.lift * m.cell * 0.22f)
         if (pv.glow) drawGlow(c + Offset(0f, r * 0.1f), r, pulse)
         drawPawn(c, r * (1f + 0.18f * pv.lift), pv.swatch)
+        if (pv.won) drawWinStar(c + Offset(0f, r * 0.45f), r * (1f + 0.18f * pv.lift) * 0.36f)
     }
 }
 
@@ -579,7 +586,8 @@ private fun PiecePickPopup(pick: PiecePick, side: Dp, onPick: (Any?) -> Unit) {
     val rows = pick.items.chunked(4)
     val perRow = minOf(pick.items.size, 4)
     val w = btn * perRow + gap * (perRow - 1) + pad * 2f
-    val h = btn * rows.size + gap * (rows.size - 1) + pad * 2f
+    val labelH = if (pick.capture) cell * 0.7f else 0.dp
+    val h = btn * rows.size + gap * (rows.size - 1) + pad * 2f + labelH + (if (pick.capture) gap else 0.dp)
 
     val cx = with(density) { m.x(pick.col).toDp() }
     val cy = with(density) { m.y(pick.row).toDp() }
@@ -592,10 +600,24 @@ private fun PiecePickPopup(pick: PiecePick, side: Dp, onPick: (Any?) -> Unit) {
         Modifier
             .offset(left, top)
             .background(Color(0xF00B2E2F), RoundedCornerShape(cell * 0.6f))
-            .border(1.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(cell * 0.6f))
+            .border(
+                if (pick.capture) 2.dp else 1.dp,
+                if (pick.capture) Color(0xFFFF8A80) else Color.White.copy(alpha = 0.5f),
+                RoundedCornerShape(cell * 0.6f)
+            )
             .padding(pad),
         verticalArrangement = Arrangement.spacedBy(gap)
     ) {
+        if (pick.capture) {
+            BasicText(
+                "Capture:",
+                style = TextStyle(
+                    color = Color.White,
+                    fontSize = with(density) { (cell * 0.5f).toSp() },
+                    fontWeight = FontWeight.ExtraBold
+                )
+            )
+        }
         for (row in rows) {
             Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
                 for (pv in row) {
@@ -611,6 +633,21 @@ private fun PiecePickPopup(pick: PiecePick, side: Dp, onPick: (Any?) -> Unit) {
             }
         }
     }
+}
+
+/** Small gold star on a winning seed. */
+private fun DrawScope.drawWinStar(c: Offset, r: Float) {
+    val p = Path()
+    for (i in 0 until 10) {
+        val ang = (-PI / 2.0 + i * PI / 5.0).toFloat()
+        val rad = if (i % 2 == 0) r else r * 0.45f
+        val x = c.x + cos(ang) * rad
+        val y = c.y + sin(ang) * rad
+        if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
+    }
+    p.close()
+    drawPath(p, Color(0xFFFFD54A))
+    drawPath(p, Color(0xFF6B4A00), style = Stroke(r * 0.18f))
 }
 
 private fun DrawScope.drawGlow(c: Offset, r: Float, pulse: Float) {
