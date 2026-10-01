@@ -10,6 +10,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -331,8 +332,11 @@ fun SettingsScreen(onClose: () -> Unit) {
                         scaleY = sc
                     }
             ) {
-                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Spacer(Modifier.height(u * 4f))
+                Column(
+                    Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
                     Box(Modifier.fillMaxWidth().padding(horizontal = u * 3f)) {
                         GlossButton(
                             "Settings", Palette.Orange, u * 56f, u * 14f,
@@ -366,8 +370,11 @@ fun GameModeScreen(onBack: () -> Unit, onYouAndComputer: () -> Unit, onTournamen
     MenuBackground(R.drawable.bg_modes) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val u = minOf(maxWidth / 100f, maxHeight / 170f)
-            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Spacer(Modifier.height(u * 4f))
+            Column(
+                Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
                 Box(Modifier.fillMaxWidth().padding(horizontal = u * 3f)) {
                     GlossButton(
                         "Game Mode", Palette.Green, u * 56f, u * 14f,
