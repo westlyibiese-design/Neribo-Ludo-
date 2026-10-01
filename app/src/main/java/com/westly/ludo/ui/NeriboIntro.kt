@@ -99,7 +99,7 @@ fun NeriboIntro(onFinished: () -> Unit) {
             fontWeight = FontWeight.ExtraBold,
             letterSpacing = (-0.01f).em
         )
-        val wordW = remember(wordStyle) { measurer.measure("Neribo", wordStyle).size.width.toFloat() }
+        val wordW = remember(wordStyle) { measurer.measure("LudoMate", wordStyle).size.width.toFloat() }
         val shineP by remember { derivedStateOf { EaseInOut.transform(seg(t.value, 4.05f, 0.9f)) } }
         val risePx = with(density) { (16f * s).dp.toPx() }
 
@@ -193,7 +193,7 @@ fun NeriboIntro(onFinished: () -> Unit) {
                 end = Offset(offsetX + 2.8f * wordW, 0f)
             )
             BasicText(
-                "Neribo",
+                "LudoMate",
                 style = wordStyle.copy(brush = shineBrush),
                 maxLines = 1,
                 softWrap = false,
@@ -207,7 +207,7 @@ fun NeriboIntro(onFinished: () -> Unit) {
             Spacer(Modifier.height((8f * s).dp))
 
             BasicText(
-                "Artificial Intelligence",
+                "© NERIBO GROUP",
                 style = TextStyle(color = TextTag, fontSize = cssSp(19f), letterSpacing = 0.01f.em),
                 maxLines = 1,
                 softWrap = false,
