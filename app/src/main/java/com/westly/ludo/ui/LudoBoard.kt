@@ -1,6 +1,17 @@
 package com.westly.ludo.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -35,8 +46,13 @@ class PieceView(
     val radius: Float,
     val glow: Boolean,
     val lift: Float = 0f,
-    val tag: Any? = null
+    val tag: Any? = null,
+    /** Board cell id shared by pieces standing on the same cell; -1 for pieces in a house. */
+    val group: Int = -1
 )
+
+/** Pieces that can all make the chosen move from one spot; the player picks which one moves. */
+class PiecePick(val row: Float, val col: Float, val items: List<PieceView>)
 
 /**
  * Ludo board (15x15 grid) with two dice in the center.
@@ -54,6 +70,8 @@ fun LudoBoard(
     pieces: (() -> List<PieceView>)? = null,
     pulse: () -> Float = { 0f },
     rollHint: Boolean = false,
+    pick: PiecePick? = null,
+    onPick: (Any?) -> Unit = {},
     onBoardTap: ((row: Float, col: Float) -> Unit)? = null
 ) {
     val measurer = rememberTextMeasurer()
@@ -82,9 +100,14 @@ fun LudoBoard(
                     drawPieceLayer(pieces(), pulse(), rollHint)
                 }
             }
+            if (pick != null) PiecePickPopup(pick, side, onPick)
         }
     }
 }
+
+// Thin margins so the 15x15 grid fills almost the whole square it is given (was 0.012 / 0.024).
+private const val PAD_FRAC = 0.004f
+private const val FRAME_FRAC = 0.016f
 
 internal class Metrics(val ox: Float, val oy: Float, val cell: Float) {
     fun x(col: Float) = ox + col * cell
@@ -94,9 +117,9 @@ internal class Metrics(val ox: Float, val oy: Float, val cell: Float) {
 
 /** Same numbers as drawLudoBoard uses, so taps and pieces line up with the drawing. */
 internal fun boardMetrics(s: Float): Metrics {
-    val pad = s * 0.012f
+    val pad = s * PAD_FRAC
     val fs = s - 2f * pad
-    val frame = fs * 0.024f
+    val frame = fs * FRAME_FRAC
     val cell = (fs - 2f * frame) / 15f
     return Metrics(pad + frame, pad + frame, cell)
 }
@@ -119,9 +142,9 @@ private val coloredCells: Map<Pair<Int, Int>, Swatch> = buildMap<Pair<Int, Int>,
 
 private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int, measurer: TextMeasurer, seeds: Boolean) {
     val s = size.minDimension
-    val pad = s * 0.012f
+    val pad = s * PAD_FRAC
     val fs = s - 2f * pad
-    val frame = fs * 0.024f
+    val frame = fs * FRAME_FRAC
     val cell = (fs - 2f * frame) / 15f
     val m = Metrics(pad + frame, pad + frame, cell)
     val boardSide = cell * 15f
@@ -146,8 +169,8 @@ private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int, measurer: TextM
 
     // Two dice, centered in the middle 3x3 area
     val mid = m.center(7, 7)
-    val edge = cell * 1.22f
-    val gap = cell * 0.14f
+    val edge = cell * 1.38f
+    val gap = cell * 0.08f
     drawDie(Offset(mid.x - gap / 2f - edge, mid.y - edge / 2f), edge, leftDie)
     drawDie(Offset(mid.x + gap / 2f, mid.y - edge / 2f), edge, rightDie)
 }
@@ -438,8 +461,8 @@ private fun DrawScope.drawPieceLayer(pieces: List<PieceView>, pulse: Float, roll
         // Soft pulsing frame around the dice: tap them to roll.
         drawRoundRect(
             Color.White.copy(alpha = 0.35f + 0.5f * pulse),
-            Offset(m.x(6.1f), m.y(6.8f)),
-            Size(m.cell * 2.8f, m.cell * 1.4f),
+            Offset(m.x(6.04f), m.y(6.76f)),
+            Size(m.cell * 2.92f, m.cell * 1.48f),
             CornerRadius(m.cell * 0.3f),
             style = Stroke(m.cell * 0.08f)
         )
@@ -448,8 +471,144 @@ private fun DrawScope.drawPieceLayer(pieces: List<PieceView>, pulse: Float, roll
     for (pv in pieces) {
         val r = pv.radius * m.cell
         val c = Offset(m.x(pv.col), m.y(pv.row) - pv.lift * m.cell * 0.22f)
-        if (pv.glow) drawGlow(c, r, pulse)
-        drawSeed(c, r * (1f + 0.18f * pv.lift), pv.swatch)
+        if (pv.glow) drawGlow(c + Offset(0f, r * 0.1f), r, pulse)
+        drawPawn(c, r * (1f + 0.18f * pv.lift), pv.swatch)
+    }
+}
+
+/**
+ * A Ludo pawn: round head, narrower neck, bell-shaped body, white collar and base rim.
+ * [c] is the middle of the board cell, [r] is half the pawn width. The pawn stands about
+ * 2.3 r tall, so at normal size it stays inside its own cell.
+ */
+internal fun DrawScope.drawPawn(c: Offset, r: Float, sw: Swatch) {
+    val rimLight = Color(0xFFFFFFFF)
+    val rimDark = Color(0xFFD9D5CB)
+    val outline = sw.dark.shade(0.7f).copy(alpha = 0.9f)
+
+    // Ground shadow
+    drawOval(
+        Color.Black.copy(alpha = 0.32f),
+        Offset(c.x - r * 1.0f, c.y + r * 0.84f),
+        Size(r * 2.0f, r * 0.42f)
+    )
+
+    // White base rim
+    drawOval(
+        Brush.verticalGradient(listOf(rimLight, rimDark), startY = c.y + r * 0.78f, endY = c.y + r * 1.2f),
+        Offset(c.x - r * 0.98f, c.y + r * 0.78f),
+        Size(r * 1.96f, r * 0.42f)
+    )
+    drawOval(outline, Offset(c.x - r * 0.98f, c.y + r * 0.78f), Size(r * 1.96f, r * 0.42f), style = Stroke(r * 0.05f))
+
+    // Bell-shaped body
+    val body = Path().apply {
+        moveTo(c.x - r * 0.84f, c.y + r * 0.98f)
+        cubicTo(
+            c.x - r * 0.70f, c.y + r * 0.40f,
+            c.x - r * 0.42f, c.y + r * 0.05f,
+            c.x - r * 0.30f, c.y - r * 0.22f
+        )
+        lineTo(c.x + r * 0.30f, c.y - r * 0.22f)
+        cubicTo(
+            c.x + r * 0.42f, c.y + r * 0.05f,
+            c.x + r * 0.70f, c.y + r * 0.40f,
+            c.x + r * 0.84f, c.y + r * 0.98f
+        )
+        close()
+    }
+    drawPath(
+        body,
+        Brush.horizontalGradient(
+            0f to sw.dark,
+            0.28f to sw.base,
+            0.42f to sw.light,
+            0.72f to sw.base,
+            1f to sw.dark,
+            startX = c.x - r * 0.84f,
+            endX = c.x + r * 0.84f
+        )
+    )
+    drawPath(body, outline, style = Stroke(r * 0.05f))
+
+    // Narrow highlight stripe down the body
+    drawOval(
+        Color.White.copy(alpha = 0.28f),
+        Offset(c.x - r * 0.40f, c.y + r * 0.12f),
+        Size(r * 0.16f, r * 0.62f)
+    )
+
+    // White collar under the head
+    drawOval(
+        Brush.verticalGradient(listOf(rimLight, rimDark), startY = c.y - r * 0.40f, endY = c.y - r * 0.02f),
+        Offset(c.x - r * 0.52f, c.y - r * 0.40f),
+        Size(r * 1.04f, r * 0.36f)
+    )
+    drawOval(outline, Offset(c.x - r * 0.52f, c.y - r * 0.40f), Size(r * 1.04f, r * 0.36f), style = Stroke(r * 0.04f))
+
+    // Round head
+    val hc = Offset(c.x, c.y - r * 0.64f)
+    val hr = r * 0.54f
+    drawCircle(
+        Brush.radialGradient(
+            listOf(sw.light, sw.base, sw.dark),
+            center = hc + Offset(-hr * 0.3f, -hr * 0.35f),
+            radius = hr * 1.7f
+        ),
+        radius = hr,
+        center = hc
+    )
+    drawCircle(outline, radius = hr, center = hc, style = Stroke(r * 0.05f))
+    drawCircle(
+        Color.White.copy(alpha = 0.55f),
+        radius = hr * 0.24f,
+        center = hc + Offset(-hr * 0.38f, -hr * 0.42f)
+    )
+}
+
+/** Small choice bubble that appears over a spot holding several movable pieces. */
+@Composable
+private fun PiecePickPopup(pick: PiecePick, side: Dp, onPick: (Any?) -> Unit) {
+    val density = LocalDensity.current
+    val m = boardMetrics(with(density) { side.toPx() })
+    val cell = with(density) { m.cell.toDp() }
+    val btn = cell * 1.6f
+    val gap = cell * 0.2f
+    val pad = cell * 0.3f
+    val rows = pick.items.chunked(4)
+    val perRow = minOf(pick.items.size, 4)
+    val w = btn * perRow + gap * (perRow - 1) + pad * 2f
+    val h = btn * rows.size + gap * (rows.size - 1) + pad * 2f
+
+    val cx = with(density) { m.x(pick.col).toDp() }
+    val cy = with(density) { m.y(pick.row).toDp() }
+    // Sit above the spot; drop below it when there is no room above. Stay inside the board.
+    val above = cy - cell * 0.6f - h
+    val top = if (above >= 0.dp) above else cy + cell * 0.6f
+    val left = (cx - w / 2f).coerceIn(0.dp, maxOf(0.dp, side - w))
+
+    Column(
+        Modifier
+            .offset(left, top)
+            .background(Color(0xF00B2E2F), RoundedCornerShape(cell * 0.6f))
+            .border(1.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(cell * 0.6f))
+            .padding(pad),
+        verticalArrangement = Arrangement.spacedBy(gap)
+    ) {
+        for (row in rows) {
+            Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                for (pv in row) {
+                    Canvas(
+                        Modifier
+                            .size(btn)
+                            .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(cell * 0.4f))
+                            .clickable { onPick(pv.tag) }
+                    ) {
+                        drawPawn(Offset(this.size.width / 2f, this.size.height * 0.5f), this.size.width * 0.3f, pv.swatch)
+                    }
+                }
+            }
+        }
     }
 }
 

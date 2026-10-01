@@ -59,11 +59,23 @@ internal fun DrawScope.drawDie(topLeft: Offset, edge: Float, value: Int) {
         style = Stroke(bevel)
     )
 
+    // Soft top gloss
+    drawRoundRect(
+        Brush.verticalGradient(
+            listOf(Color.White.copy(alpha = 0.22f), Color.Transparent),
+            startY = topLeft.y,
+            endY = topLeft.y + edge * 0.5f
+        ),
+        topLeft + Offset(edge * 0.06f, edge * 0.05f),
+        Size(edge * 0.88f, edge * 0.42f),
+        CornerRadius(edge * 0.16f)
+    )
+
     // Outline
     drawRoundRect(Palette.DieEdge, topLeft, body, corner, style = Stroke(edge * 0.022f))
 
     // Pips
-    val pipR = edge * 0.085f
+    val pipR = edge * 0.098f
     PipLayouts.getValue(value.coerceIn(1, 6)).forEach { (fx, fy) ->
         val c = topLeft + Offset(edge * fx, edge * fy)
         drawCircle(Color.Black.copy(alpha = 0.28f), radius = pipR * 1.12f, center = c)

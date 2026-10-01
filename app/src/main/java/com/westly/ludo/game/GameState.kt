@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import com.westly.ludo.ui.Palette
+import com.westly.ludo.ui.PiecePick
 import com.westly.ludo.ui.PieceView
 import com.westly.ludo.ui.Swatch
 import kotlin.math.PI
@@ -45,7 +46,11 @@ class LudoGame {
     var die2 by mutableIntStateOf(0)
     var used1 by mutableStateOf(false)
     var used2 by mutableStateOf(false)
+    /** -1 = nothing chosen yet, 0 = first die (blue), 1 = second die (green), 2 = total (red). */
     var selectedDie by mutableIntStateOf(-1)
+
+    /** Set when the player taps a spot holding several movable pieces: they must pick one. */
+    var pick by mutableStateOf<PiecePick?>(null)
 
     // Faces shown on the two real dice.
     var face1 by mutableIntStateOf(3)
@@ -59,9 +64,6 @@ class LudoGame {
     private fun colorsOf(player: Int): List<LudoColor> =
         if (player == 0) listOf(LudoColor.YELLOW, LudoColor.RED)
         else listOf(LudoColor.GREEN, LudoColor.BLUE)
-
-    private fun dieValue(i: Int): Int = if (i == 0) die1 else die2
-    private fun dieUsed(i: Int): Boolean = if (i == 0) used1 else used2
 
     private fun ownPieces(): List<Piece> {
         val mine = colorsOf(activePlayer)
@@ -79,16 +81,45 @@ class LudoGame {
         }
     }
 
-    private fun usableDice(): List<Int> =
-        (0..1).filter { i -> !dieUsed(i) && ownPieces().any { canMove(it, dieValue(i)) } }
+    /** Number of steps behind option i: 0 = first die, 1 = second die, 2 = both dice together. */
+    private fun optionValue(i: Int): Int = when (i) {
+        0 -> die1
+        1 -> die2
+        else -> die1 + die2
+    }
 
-    /** True for pieces that may move with the currently selected die. */
+    /** True while the dice behind option i have not been spent. */
+    private fun optionFresh(i: Int): Boolean = when (i) {
+        0 -> die1 > 0 && !used1
+        1 -> die2 > 0 && !used2
+        else -> die1 > 0 && die2 > 0 && !used1 && !used2
+    }
+
+    /** Can this piece make the full move of option i? The total never brings a piece out of the house. */
+    private fun canUse(piece: Piece, i: Int): Boolean {
+        if (!optionFresh(i)) return false
+        val d = optionValue(i)
+        return if (i == 2) {
+            piece.progress >= 0 && piece.progress < Route.CENTER && piece.progress + d <= Route.CENTER
+        } else {
+            canMove(piece, d)
+        }
+    }
+
+    /** True when option i can be tapped: not spent, and at least one piece can really make it. */
+    fun optionUsable(i: Int): Boolean =
+        phase == Phase.Choose && optionFresh(i) && ownPieces().any { canUse(it, i) }
+
+    private fun usableOptions(): List<Int> =
+        (0..2).filter { i -> optionFresh(i) && ownPieces().any { canUse(it, i) } }
+
+    /** True for pieces that may move with the currently selected option. Nothing glows before a choice. */
     private fun isGlowing(piece: Piece): Boolean {
         if (phase != Phase.Choose) return false
         val i = selectedDie
-        if (i < 0 || dieUsed(i)) return false
+        if (i !in 0..2) return false
         if (piece.color !in colorsOf(activePlayer)) return false
-        return canMove(piece, dieValue(i))
+        return canUse(piece, i)
     }
 
     /** Everything needed to continue the game later, as text. */
@@ -139,6 +170,7 @@ class LudoGame {
                 p.finishRank = a.getInt(1)
             }
             movingPiece = null
+            pick = null
             activePlayer = o.getInt("activePlayer")
             winner = o.getInt("winner")
             die1 = o.getInt("die1")
@@ -168,9 +200,9 @@ class LudoGame {
             phase = Phase.GameOver
             return
         }
-        val usable = usableDice()
+        val usable = usableOptions()
         if (usable.isNotEmpty()) {
-            if (selectedDie !in usable) selectedDie = usable.first()
+            if (selectedDie !in usable) selectedDie = -1
             phase = Phase.Choose
             return
         }
@@ -190,6 +222,7 @@ class LudoGame {
             p.finishRank = -1
         }
         movingPiece = null
+        pick = null
         activePlayer = 0
         winner = -1
         die1 = 0
@@ -226,12 +259,12 @@ class LudoGame {
     }
 
     private suspend fun afterDiceChange() {
-        val usable = usableDice()
-        if (usable.isEmpty()) {
+        pick = null
+        selectedDie = -1
+        if (usableOptions().isEmpty()) {
             endTurn()
             return
         }
-        if (selectedDie !in usable) selectedDie = usable.first()
         phase = Phase.Choose
     }
 
@@ -248,19 +281,41 @@ class LudoGame {
         phase = Phase.AwaitRoll
     }
 
-    /** The player taps the blue (0) or green (1) circle to decide which die to use next. */
+    /** The player taps the blue (0), green (1) or red total (2) circle to decide what to move by. */
     fun selectDie(i: Int) {
         if (phase != Phase.Choose) return
-        if (i !in usableDice()) return
+        if (!optionUsable(i)) return
+        pick = null
         selectedDie = i
+    }
+
+    /** Called when the player picks one pawn in the same-spot popup. */
+    suspend fun onPiecePicked(tag: Any?) {
+        val piece = tag as? Piece ?: return
+        pick = null
+        choosePiece(piece)
+    }
+
+    fun dismissPick() {
+        pick = null
     }
 
     private suspend fun choosePiece(piece: Piece) {
         if (!isGlowing(piece)) return
         val dieIndex = selectedDie
-        val d = dieValue(dieIndex)
+        val d = optionValue(dieIndex)
         phase = Phase.Moving
-        if (dieIndex == 0) used1 = true else used2 = true
+        pick = null
+        // The red total spends both dice at once; a single die spends only itself.
+        when (dieIndex) {
+            0 -> used1 = true
+            1 -> used2 = true
+            else -> {
+                used1 = true
+                used2 = true
+            }
+        }
+        selectedDie = -1
         movedThisRoll = true
 
         val from = piece.progress
@@ -286,7 +341,7 @@ class LudoGame {
         movingPiece = piece
         moveProgress = from.toFloat()
         val steps = to - from
-        val duration = if (from == Route.IN_HOUSE) 400f else steps * 190f
+        val duration = if (from == Route.IN_HOUSE) 400f else steps * (if (steps > 6) 150f else 190f)
         if (from == Route.IN_HOUSE) sounds.out()
         var lastCell = from
         val startNanos = withFrameNanos { it }
@@ -316,10 +371,13 @@ class LudoGame {
                 if (row in 6f..9f && col in 6f..9f) newGame()
             }
             Phase.Choose -> {
+                // Any tap while a popup is open first closes it (its own buttons handle their own taps).
+                pick = null
+                if (selectedDie !in 0..2) return
+                val views = pieceViews().filter { it.glow }
                 var best: PieceView? = null
                 var bestDist = 1.15f
-                for (v in pieceViews()) {
-                    if (!v.glow) continue
+                for (v in views) {
                     val dr = v.row - row
                     val dc = v.col - col
                     val dist = sqrt(dr * dr + dc * dc)
@@ -328,8 +386,19 @@ class LudoGame {
                         best = v
                     }
                 }
-                val hit = best
-                if (hit != null) choosePiece(hit.tag as Piece)
+                val hit = best ?: return
+                // Every movable piece standing on the tapped spot (house seeds each have their own spot).
+                val here = if (hit.group >= 0) views.filter { it.group == hit.group } else listOf(hit)
+                if (here.size <= 1) {
+                    choosePiece(hit.tag as Piece)
+                } else {
+                    // Several pieces here: the player decides, never the game.
+                    pick = PiecePick(
+                        (hit.group / 20) + 0.5f,
+                        (hit.group % 20) + 0.5f,
+                        here.sortedBy { (it.tag as Piece).color.ordinal * 4 + (it.tag as Piece).slot }
+                    )
+                }
             }
             else -> {}
         }
@@ -379,7 +448,7 @@ class LudoGame {
             val cols = ceil(sqrt(n.toFloat())).toInt()
             val rowsN = (n + cols - 1) / cols
             val spacing = 0.86f / cols
-            val rad = BOARD_R / cols
+            val rad = if (cols == 1) BOARD_R else BOARD_R * 1.25f / cols
             list.forEachIndexed { i, p ->
                 val ox = (i % cols) - (cols - 1) / 2f
                 val oy = (i / cols) - (rowsN - 1) / 2f
@@ -391,7 +460,8 @@ class LudoGame {
                         rad,
                         isGlowing(p),
                         0f,
-                        p
+                        p,
+                        key
                     )
                 )
             }
