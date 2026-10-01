@@ -55,6 +55,9 @@ object Route {
         LudoColor.RED -> listOf(13 to 7, 12 to 7, 11 to 7, 10 to 7, 9 to 7)
     }
 
+    /** Position 0..51 on the common route for progress 0..50. */
+    fun ringIndex(color: LudoColor, progress: Int): Int = (startIndex(color) + progress) % 52
+
     /** Board cell (row, col) for progress 0..55. */
     fun cell(color: LudoColor, progress: Int): Pair<Int, Int> =
         if (progress <= 50) ring[(startIndex(color) + progress) % 52]

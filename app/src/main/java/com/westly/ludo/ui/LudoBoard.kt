@@ -79,7 +79,9 @@ fun LudoBoard(
     rollHint: Boolean = false,
     pick: PiecePick? = null,
     onPick: (Any?) -> Unit = {},
-    onBoardTap: ((row: Float, col: Float) -> Unit)? = null
+    onBoardTap: ((row: Float, col: Float) -> Unit)? = null,
+    /** Yard names in the order green, yellow, red, blue. */
+    yardLabels: List<String> = listOf("Player 2", "Player 1", "Player 1", "Player 2")
 ) {
     val measurer = rememberTextMeasurer()
     val tapHandler = rememberUpdatedState(onBoardTap)
@@ -100,7 +102,7 @@ fun LudoBoard(
         ) {
             // The static board sits on its own layer so it is not redrawn while pieces move.
             Canvas(Modifier.fillMaxSize().graphicsLayer { }) {
-                drawLudoBoard(leftDie, rightDie, measurer, pieces == null)
+                drawLudoBoard(leftDie, rightDie, measurer, pieces == null, yardLabels)
             }
             if (pieces != null) {
                 Canvas(Modifier.fillMaxSize()) {
@@ -147,7 +149,13 @@ private val coloredCells: Map<Pair<Int, Int>, Swatch> = buildMap<Pair<Int, Int>,
     put(8 to 13, Palette.Blue)
 }
 
-private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int, measurer: TextMeasurer, seeds: Boolean) {
+private fun DrawScope.drawLudoBoard(
+    leftDie: Int,
+    rightDie: Int,
+    measurer: TextMeasurer,
+    seeds: Boolean,
+    labels: List<String>
+) {
     val s = size.minDimension
     val pad = s * PAD_FRAC
     val fs = s - 2f * pad
@@ -162,7 +170,7 @@ private fun DrawScope.drawLudoBoard(leftDie: Int, rightDie: Int, measurer: TextM
     drawRoundRect(Palette.Cream, Offset(m.ox, m.oy), Size(boardSide, boardSide), boardCorner)
 
     drawPathCells(m)
-    drawYards(m, measurer, seeds)
+    drawYards(m, measurer, seeds, labels)
     drawCenter(m)
     drawPathArrows(m)
 
@@ -248,11 +256,11 @@ private fun DrawScope.drawPathCells(m: Metrics) {
     }
 }
 
-private fun DrawScope.drawYards(m: Metrics, measurer: TextMeasurer, seeds: Boolean) {
-    drawYard(m, 0, 0, Palette.Green, "Player 2", measurer, seeds)
-    drawYard(m, 0, 9, Palette.Yellow, "Player 1", measurer, seeds)
-    drawYard(m, 9, 0, Palette.Red, "Player 1", measurer, seeds)
-    drawYard(m, 9, 9, Palette.Blue, "Player 2", measurer, seeds)
+private fun DrawScope.drawYards(m: Metrics, measurer: TextMeasurer, seeds: Boolean, labels: List<String>) {
+    drawYard(m, 0, 0, Palette.Green, labels[0], measurer, seeds)
+    drawYard(m, 0, 9, Palette.Yellow, labels[1], measurer, seeds)
+    drawYard(m, 9, 0, Palette.Red, labels[2], measurer, seeds)
+    drawYard(m, 9, 9, Palette.Blue, labels[3], measurer, seeds)
 }
 
 private fun DrawScope.drawYard(

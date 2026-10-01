@@ -34,19 +34,21 @@ class Piece(val color: LudoColor, val slot: Int) {
 
 /**
  * All gameplay rules live here. The board only draws what this class says.
- * Player 1 owns yellow + red, Player 2 owns green + blue (as labelled on the yards).
+ * You & Computer: Player 1 owns yellow + red, Player 2 owns green + blue (as labelled on the yards).
+ * Tournament: four independent players with one color (4 seeds) each, no teams.
  */
-class LudoGame {
+class LudoGame(val tournament: Boolean = false) {
     val pieces: List<Piece> = LudoColor.values().flatMap { c -> (0..3).map { Piece(c, it) } }
 
-    private val sounds = Sounds()
+    private val sounds by lazy { Sounds() }
 
     var phase by mutableStateOf(Phase.AwaitRoll)
     var activePlayer by mutableIntStateOf(0)
     var winner by mutableIntStateOf(-1)
 
     /** Match score of Player 1 (index 0) and Player 2 (index 1). It survives round resets. */
-    val scores = mutableStateListOf(0, 0)
+    val playerCount: Int = if (tournament) 4 else 2
+    val scores = mutableStateListOf<Int>().apply { repeat(playerCount) { add(0) } }
 
     // The two dice values (0 = not rolled yet) and whether each has been used this turn.
     var die1 by mutableIntStateOf(0)
@@ -77,7 +79,8 @@ class LudoGame {
     private var retT by mutableFloatStateOf(0f)
 
     private fun colorsOf(player: Int): List<LudoColor> =
-        if (player == 0) listOf(LudoColor.YELLOW, LudoColor.RED)
+        if (tournament) listOf(TOURNAMENT_COLORS[player])
+        else if (player == 0) listOf(LudoColor.YELLOW, LudoColor.RED)
         else listOf(LudoColor.GREEN, LudoColor.BLUE)
 
     private fun ownPieces(): List<Piece> {
@@ -174,6 +177,139 @@ class LudoGame {
         return canUse(piece, i)
     }
 
+
+    // ------------------------------------------------------------------
+    // Tournament computer players and hand guidance.
+    // Everything below only READS the shared rules above (canUse, forcedContinuation, ...)
+    // and then plays through the very same selectDie / choosePiece / onPiecePicked
+    // functions the human uses, so the computer can never do anything a human could not.
+    // ------------------------------------------------------------------
+
+    /** Tournament: players 2, 3 and 4 are computers; each has its own ComputerPlayer. */
+    val isComputerTurn: Boolean
+        get() = tournament && activePlayer != 0 && phase != Phase.GameOver
+
+    /** The color a player controls in Tournament (index 0..3). */
+    fun tournamentColor(player: Int): LudoColor = TOURNAMENT_COLORS[player]
+
+    /** Set while the game screen is not visible, so computers stop at a clean moment. */
+    var paused by mutableStateOf(false)
+
+    /** What the computer has decided to do right now (drives the hand, never separate from it). */
+    var plannedMove by mutableStateOf<Move?>(null)
+        private set
+    var plannedVictim by mutableStateOf<Piece?>(null)
+        private set
+
+    private var computerBusy = false
+    private val computers: List<ComputerPlayer> =
+        if (tournament) (1..3).map { ComputerPlayer(it, TOURNAMENT_COLORS[it]) } else emptyList()
+
+    /** Every (movement option, seed) pair that is legal right now for the active player. */
+    fun legalMoves(): List<Move> {
+        if (phase != Phase.Choose) return emptyList()
+        val out = ArrayList<Move>()
+        for (i in 0..2) {
+            if (!optionFresh(i)) continue
+            for (p in ownPieces()) if (canUse(p, i)) out.add(Move(i, p))
+        }
+        return out
+    }
+
+    /** Where the seed really ends up (progress) if this move is made, including the 5 + 5 rule. */
+    fun targetOf(m: Move): Int {
+        val i = m.option
+        val forced = i != 2 && forcedContinuation(m.piece, i)
+        val extra = if (forced) optionValue(1 - i) else 0
+        val from = m.piece.progress
+        return if (from == Route.IN_HOUSE) extra else from + optionValue(i) + extra
+    }
+
+    /** Opponent seeds that would be standing on the final cell of this move. */
+    fun victimsAfter(m: Move): List<Piece> {
+        val t = targetOf(m)
+        if (t !in 0 until Route.CENTER) return emptyList()
+        val (r, c) = Route.cell(m.piece.color, t)
+        return opponentsAtCell(r, c)
+    }
+
+    private fun spotOf(piece: Piece): HandTarget.Spot {
+        val (r, c) = Route.anchor(piece.color, piece.slot, piece.finishRank, piece.progress)
+        return HandTarget.Spot(r, c)
+    }
+
+    /** Where the pointing hand should be right now, or null when no guidance is needed. */
+    fun handTarget(): HandTarget? {
+        when (phase) {
+            Phase.AwaitRoll -> return HandTarget.Dice
+            Phase.Choose -> {
+                if (isComputerTurn) {
+                    val m = plannedMove ?: return null
+                    return if (selectedDie == -1) HandTarget.Orb(m.option) else spotOf(m.piece)
+                }
+                if (pick != null) return null
+                if (selectedDie == -1) {
+                    val u = usableOptions()
+                    return if (u.size == 1) HandTarget.Orb(u[0]) else null
+                }
+                val glowing = ownPieces().filter { isGlowing(it) }
+                return when {
+                    glowing.size == 1 -> spotOf(glowing[0])
+                    glowing.isNotEmpty() && glowing.all { it.progress == Route.IN_HOUSE } -> spotOf(glowing[0])
+                    else -> null
+                }
+            }
+            Phase.CaptureChoose -> {
+                val v = plannedVictim
+                return if (isComputerTurn && v != null) spotOf(v) else null
+            }
+            else -> return null
+        }
+    }
+
+    /**
+     * Plays the computer's turn(s) step by step with short pauses, until it is the human's turn
+     * (or the screen is paused). Safe to call again at any time: only one run is active.
+     */
+    suspend fun computerStep() {
+        if (computerBusy) return
+        computerBusy = true
+        try {
+            while (isComputerTurn && !paused) {
+                val ai = computers[activePlayer - 1]
+                when (phase) {
+                    Phase.AwaitRoll -> {
+                        delay(700)
+                        if (paused) return
+                        roll()
+                    }
+                    Phase.Choose -> {
+                        val move = ai.chooseMove(this) ?: return
+                        plannedMove = move
+                        delay(800)                        // hand points at the movement circle
+                        if (paused) { plannedMove = null; return }
+                        selectDie(move.option)
+                        delay(700)                        // hand moves to the seed
+                        if (paused) { plannedMove = null; return }
+                        choosePiece(move.piece)
+                        plannedMove = null
+                    }
+                    Phase.CaptureChoose -> {
+                        val victim = ai.chooseVictim(this) ?: return
+                        plannedVictim = victim
+                        delay(900)
+                        if (paused) { plannedVictim = null; return }
+                        onPiecePicked(victim)
+                        plannedVictim = null
+                    }
+                    else -> return
+                }
+            }
+        } finally {
+            computerBusy = false
+        }
+    }
+
     /** Everything needed to continue the game later, as text. */
     fun toSaveString(): String {
         val o = JSONObject()
@@ -202,7 +338,7 @@ class LudoGame {
             else -> null
         }
         o.put("pendingMover", if (pm == null) -1 else pieces.indexOf(pm))
-        o.put("scores", JSONArray().put(scores[0]).put(scores[1]))
+        o.put("scores", JSONArray().also { a -> scores.forEach { a.put(it) } })
         o.put("activePlayer", activePlayer)
         o.put("winner", winner)
         o.put("die1", die1)
@@ -234,9 +370,8 @@ class LudoGame {
                 if (p.won && p.progress in 0 until Route.CENTER) p.progress = Route.BANKED
             }
             val sc = o.optJSONArray("scores")
-            if (sc != null && sc.length() == 2) {
-                scores[0] = sc.getInt(0)
-                scores[1] = sc.getInt(1)
+            if (sc != null && sc.length() == playerCount) {
+                for (i in 0 until playerCount) scores[i] = sc.getInt(i)
             }
             movingPiece = null
             pendingMover = null
@@ -297,14 +432,13 @@ class LudoGame {
         used1 = false
         used2 = false
         selectedDie = -1
-        if (!extraRoll) activePlayer = 1 - activePlayer
+        if (!extraRoll) activePlayer = (activePlayer + 1) % playerCount
         phase = Phase.AwaitRoll
     }
 
     /** Starts a whole new match: scores go back to 0. */
     fun newGame() {
-        scores[0] = 0
-        scores[1] = 0
+        for (i in 0 until playerCount) scores[i] = 0
         resetRound()
     }
 
@@ -380,7 +514,7 @@ class LudoGame {
         used1 = false
         used2 = false
         selectedDie = -1
-        if (!extraRoll) activePlayer = 1 - activePlayer
+        if (!extraRoll) activePlayer = (activePlayer + 1) % playerCount
         phase = Phase.AwaitRoll
     }
 
@@ -695,8 +829,20 @@ class LudoGame {
     }
 
     private companion object {
+        /** Tournament players 1..4 in turn order (clockwise around the board). */
+        val TOURNAMENT_COLORS = listOf(LudoColor.RED, LudoColor.GREEN, LudoColor.YELLOW, LudoColor.BLUE)
         const val HOUSE_R = 0.66f
         const val BOARD_R = 0.42f
         const val FINISH_R = 0.14f
     }
+}
+
+/** One legal action: use movement option [option] (0 = blue, 1 = green, 2 = red total) on [piece]. */
+class Move(val option: Int, val piece: Piece)
+
+/** Where the pointing hand should be. */
+sealed class HandTarget {
+    object Dice : HandTarget()
+    class Orb(val index: Int) : HandTarget()
+    class Spot(val row: Float, val col: Float) : HandTarget()
 }

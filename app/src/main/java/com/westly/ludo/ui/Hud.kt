@@ -47,12 +47,12 @@ private fun hudTextStyle(size: TextUnit) = TextStyle(
 )
 
 @Composable
-private fun Pill(text: String, textSize: Dp, modifier: Modifier = Modifier) {
+private fun Pill(text: String, textSize: Dp, modifier: Modifier = Modifier, edge: Color = Palette.PillEdge) {
     val shape = RoundedCornerShape(50)
     Box(
         modifier = modifier
             .background(Brush.verticalGradient(listOf(Palette.PillLight, Palette.PillDark)), shape)
-            .border(1.dp, Palette.PillEdge, shape),
+            .border(1.dp, edge, shape),
         contentAlignment = Alignment.Center
     ) {
         BasicText(text, style = hudTextStyle(textSize.asSp()), maxLines = 1, softWrap = false)
@@ -61,9 +61,9 @@ private fun Pill(text: String, textSize: Dp, modifier: Modifier = Modifier) {
 
 /** Player name pill with the score pill underneath. [unit] is 1% of the screen width. */
 @Composable
-fun PlayerBadge(name: String, score: Int, unit: Dp, modifier: Modifier = Modifier) {
+fun PlayerBadge(name: String, score: Int, unit: Dp, modifier: Modifier = Modifier, accent: Color? = null) {
     Column(modifier.width(unit * 32f), horizontalAlignment = Alignment.CenterHorizontally) {
-        Pill(name, unit * 4.6f, Modifier.fillMaxWidth().height(unit * 7.3f))
+        Pill(name, unit * 4.6f, Modifier.fillMaxWidth().height(unit * 7.3f), accent ?: Palette.PillEdge)
         Spacer(Modifier.height(unit * 0.6f))
         Pill("Score: $score", unit * 3.9f, Modifier.width(unit * 27f).height(unit * 5.6f))
     }
