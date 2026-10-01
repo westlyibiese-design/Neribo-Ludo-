@@ -263,11 +263,13 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
                 }
             }
 
-            // Pointing hand: driven by the real game state (current turn and planned action).
+            // Computer hand: driven by the computer's real, already-decided action (never on the human's turn).
             val colTop = (maxHeight - (boardSide + u * fixedU)) / 2f
             val boardTop = colTop + u * 27.5f
             HandGuide(
                 target = game.handTarget(),
+                owner = game.handColor(),
+                screenW = maxWidth,
                 boardLeft = (maxWidth - boardSide) / 2f,
                 boardTop = boardTop,
                 boardSide = boardSide,

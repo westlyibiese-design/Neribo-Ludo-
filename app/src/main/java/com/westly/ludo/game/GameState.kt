@@ -185,9 +185,14 @@ class LudoGame(val tournament: Boolean = false) {
     // functions the human uses, so the computer can never do anything a human could not.
     // ------------------------------------------------------------------
 
-    /** Tournament: players 2, 3 and 4 are computers; each has its own ComputerPlayer. */
+    /**
+     * Player 1 is always the human. You & Computer: Player 2 is the computer.
+     * Tournament: Players 2, 3 and 4 are three independent computers.
+     */
+    private val computerSeats: Set<Int> = if (tournament) setOf(1, 2, 3) else setOf(1)
+
     val isComputerTurn: Boolean
-        get() = tournament && activePlayer != 0 && phase != Phase.GameOver
+        get() = activePlayer in computerSeats && phase != Phase.GameOver
 
     /** The color a player controls in Tournament (index 0..3). */
     fun tournamentColor(player: Int): LudoColor = TOURNAMENT_COLORS[player]
@@ -203,7 +208,8 @@ class LudoGame(val tournament: Boolean = false) {
 
     private var computerBusy = false
     private val computers: List<ComputerPlayer> =
-        if (tournament) (1..3).map { ComputerPlayer(it, TOURNAMENT_COLORS[it]) } else emptyList()
+        if (tournament) (1..3).map { ComputerPlayer(it, listOf(TOURNAMENT_COLORS[it])) }
+        else listOf(ComputerPlayer(1, listOf(LudoColor.GREEN, LudoColor.BLUE)))
 
     /** Every (movement option, seed) pair that is legal right now for the active player. */
     fun legalMoves(): List<Move> {
@@ -238,32 +244,28 @@ class LudoGame(val tournament: Boolean = false) {
         return HandTarget.Spot(r, c)
     }
 
-    /** Where the pointing hand should be right now, or null when no guidance is needed. */
+    /** The yard color whose side the computer's hand comes from right now. */
+    fun handColor(): LudoColor {
+        plannedMove?.let { return it.piece.color }
+        if (phase == Phase.CaptureChoose) pendingMover?.let { return it.color }
+        return colorsOf(activePlayer).first()
+    }
+
+    /**
+     * Where the computer's hand should be right now, or null. The hand belongs to the computer
+     * only: on the human's turn there is never a hand. It only follows the computer's real,
+     * already-decided plan.
+     */
     fun handTarget(): HandTarget? {
-        when (phase) {
-            Phase.AwaitRoll -> return HandTarget.Dice
+        if (!isComputerTurn) return null
+        return when (phase) {
+            Phase.AwaitRoll -> HandTarget.Dice
             Phase.Choose -> {
-                if (isComputerTurn) {
-                    val m = plannedMove ?: return null
-                    return if (selectedDie == -1) HandTarget.Orb(m.option) else spotOf(m.piece)
-                }
-                if (pick != null) return null
-                if (selectedDie == -1) {
-                    val u = usableOptions()
-                    return if (u.size == 1) HandTarget.Orb(u[0]) else null
-                }
-                val glowing = ownPieces().filter { isGlowing(it) }
-                return when {
-                    glowing.size == 1 -> spotOf(glowing[0])
-                    glowing.isNotEmpty() && glowing.all { it.progress == Route.IN_HOUSE } -> spotOf(glowing[0])
-                    else -> null
-                }
+                val m = plannedMove ?: return null
+                if (selectedDie == -1) HandTarget.Orb(m.option) else spotOf(m.piece)
             }
-            Phase.CaptureChoose -> {
-                val v = plannedVictim
-                return if (isComputerTurn && v != null) spotOf(v) else null
-            }
-            else -> return null
+            Phase.CaptureChoose -> plannedVictim?.let { spotOf(it) }
+            else -> null
         }
     }
 
@@ -276,10 +278,10 @@ class LudoGame(val tournament: Boolean = false) {
         computerBusy = true
         try {
             while (isComputerTurn && !paused) {
-                val ai = computers[activePlayer - 1]
+                val ai = computers.first { it.playerIndex == activePlayer }
                 when (phase) {
                     Phase.AwaitRoll -> {
-                        delay(700)
+                        delay(1000)                       // hand reaches the dice
                         if (paused) return
                         roll()
                     }
