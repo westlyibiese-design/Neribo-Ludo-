@@ -24,7 +24,7 @@ import org.json.JSONObject
 enum class Phase { AwaitRoll, Rolling, Choose, Moving, Pausing, CaptureChoose, GameOver }
 
 class Piece(val color: LudoColor, val slot: Int) {
-    /** -1 = in house, 0..55 = on the route, 56 = reached the center. */
+    /** -1 = in house, 0..55 = on the route, 56 = reached the center, 57 = banked after a capture. */
     var progress by mutableIntStateOf(Route.IN_HOUSE)
     var finishRank by mutableIntStateOf(-1)
 
@@ -229,7 +229,9 @@ class LudoGame {
                 val a = arr.getJSONArray(i)
                 p.progress = a.getInt(0)
                 p.finishRank = a.getInt(1)
-                p.won = (a.length() > 2 && a.getInt(2) == 1) || p.progress == Route.CENTER
+                p.won = (a.length() > 2 && a.getInt(2) == 1) || p.progress >= Route.CENTER
+                // Older saves left a capturing seed standing on the route: bank it now.
+                if (p.won && p.progress in 0 until Route.CENTER) p.progress = Route.BANKED
             }
             val sc = o.optJSONArray("scores")
             if (sc != null && sc.length() == 2) {
@@ -481,11 +483,16 @@ class LudoGame {
         phase = Phase.CaptureChoose
     }
 
-    /** Sends the victim back to its own house; it needs a new 6 to come out. */
+    /**
+     * Sends the victim back to its own house (it needs a new 6 to come out), and banks the
+     * capturing seed as a winning seed: it leaves the route and is never sent to its house.
+     */
     private fun applyCapture(mover: Piece, victim: Piece) {
         victim.progress = Route.IN_HOUSE
         victim.finishRank = -1
         mover.won = true
+        mover.progress = Route.BANKED
+        mover.finishRank = -1
     }
 
     private suspend fun capture(mover: Piece, victim: Piece) {
@@ -598,6 +605,7 @@ class LudoGame {
                     val (r, c) = Route.houseSpot(p.color, p.slot)
                     house.add(PieceView(swatchOf(p.color), r, c, HOUSE_R, isGlowing(p), 0f, p))
                 }
+                pr == Route.BANKED -> continue   // a banked winning seed is no longer on the board
                 pr >= Route.CENTER -> {
                     val (r, c) = Route.finishSpot(p.color, p.finishRank)
                     done.add(PieceView(swatchOf(p.color), r, c, FINISH_R, false, 0f, p))

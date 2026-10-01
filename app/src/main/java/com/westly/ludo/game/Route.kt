@@ -11,6 +11,8 @@ enum class LudoColor { GREEN, YELLOW, BLUE, RED }
  *    1..50    = common route (step 50 is the cell just before its own lane)
  *    51..55   = the five cells of its own colored lane
  *    56       = the center / home
+ *    57       = banked: a winning seed that captured an opponent. It is off the board for good
+ *               this round (not drawn, not selectable, not movable, cannot be captured).
  * So after entering, a piece travels 50 steps to reach the lane entrance,
  * then 6 more steps (5 lane cells + the center).
  *
@@ -19,6 +21,7 @@ enum class LudoColor { GREEN, YELLOW, BLUE, RED }
 object Route {
     const val IN_HOUSE = -1
     const val CENTER = 56
+    const val BANKED = 57
 
     // The 52 cells of the common route, clockwise, starting at the green start cell.
     private val ring: List<Pair<Int, Int>> = listOf(
