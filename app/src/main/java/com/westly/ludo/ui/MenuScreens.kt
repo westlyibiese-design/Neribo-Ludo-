@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,16 +39,20 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import com.westly.ludo.R
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -66,13 +71,21 @@ private fun menuText(size: TextUnit, color: Color = Color.White) = TextStyle(
 )
 
 @Composable
-private fun MenuBackground(content: @Composable () -> Unit) {
+private fun MenuBackground(image: Int, content: @Composable () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(Palette.WoodLight, Palette.WoodDark)))
-            .systemBarsPadding()
-    ) { content() }
+    ) {
+        // The picture fills the whole screen (also behind the system bars); the menu sits on top.
+        Image(
+            painter = painterResource(image),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+        Box(Modifier.fillMaxSize().systemBarsPadding()) { content() }
+    }
 }
 
 /** Big glossy rounded button. [onClick] null = shown but inactive. */
@@ -173,24 +186,40 @@ private fun LudoMateLogo(u: Dp) {
             }
         }
         Spacer(Modifier.height(u * 1.5f))
-        BasicText(
-            "Ludo Mate",
-            style = TextStyle(
-                brush = Brush.verticalGradient(listOf(Color(0xFFFFF3C4), Color(0xFFFFB92E))),
-                fontSize = (u * 14.5f).sp(),
-                fontWeight = FontWeight.ExtraBold,
-                textAlign = TextAlign.Center,
-                shadow = Shadow(Color.Black.copy(alpha = 0.55f), Offset(0f, 6f), 10f)
-            ),
-            maxLines = 1,
-            softWrap = false
-        )
+        val outlinePx = with(LocalDensity.current) { (u * 1.3f).toPx() }
+        Box(contentAlignment = Alignment.Center) {
+            // Dark brown outline behind the gold letters, so the title reads on any background.
+            BasicText(
+                "Ludo Mate",
+                style = TextStyle(
+                    color = Color(0xFF3F2916),
+                    fontSize = (u * 14.5f).sp(),
+                    fontWeight = FontWeight.ExtraBold,
+                    textAlign = TextAlign.Center,
+                    drawStyle = Stroke(width = outlinePx, join = StrokeJoin.Round)
+                ),
+                maxLines = 1,
+                softWrap = false
+            )
+            BasicText(
+                "Ludo Mate",
+                style = TextStyle(
+                    brush = Brush.verticalGradient(listOf(Color(0xFFFFF3C4), Color(0xFFFFB92E))),
+                    fontSize = (u * 14.5f).sp(),
+                    fontWeight = FontWeight.ExtraBold,
+                    textAlign = TextAlign.Center,
+                    shadow = Shadow(Color.Black.copy(alpha = 0.55f), Offset(0f, 6f), 10f)
+                ),
+                maxLines = 1,
+                softWrap = false
+            )
+        }
     }
 }
 
 @Composable
 fun HomeScreen(onSettings: () -> Unit, onGame: () -> Unit) {
-    MenuBackground {
+    MenuBackground(R.drawable.bg_home) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val u = minOf(maxWidth / 100f, maxHeight / 185f)
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -289,7 +318,7 @@ fun SettingsScreen(onClose: () -> Unit) {
     val enter = remember { Animatable(0f) }
     LaunchedEffect(Unit) { enter.animateTo(1f, tween(320)) }
 
-    MenuBackground {
+    MenuBackground(R.drawable.bg_settings) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val u = minOf(maxWidth / 100f, maxHeight / 160f)
             Box(
@@ -334,7 +363,7 @@ fun SettingsScreen(onClose: () -> Unit) {
 
 @Composable
 fun GameModeScreen(onBack: () -> Unit, onYouAndComputer: () -> Unit, onTournament: () -> Unit) {
-    MenuBackground {
+    MenuBackground(R.drawable.bg_modes) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val u = minOf(maxWidth / 100f, maxHeight / 170f)
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
