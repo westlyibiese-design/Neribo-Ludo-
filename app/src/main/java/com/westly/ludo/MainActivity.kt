@@ -292,7 +292,9 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
 @Composable
 private fun MoveOrb(game: LudoGame, index: Int, value: Int, swatch: Swatch, u: Dp) {
     val usable = game.optionUsable(index)
-    val selected = usable && game.selectedDie == index
+    // Display only: on a computer turn the highlight follows the computer's own internal choice.
+    val shownOption = if (game.isComputerTurn) game.computerOption else game.selectedDie
+    val selected = usable && shownOption == index
     val scale by animateFloatAsState(if (selected) 1.14f else 1f, label = "orbScale")
     val ring = when {
         selected -> Modifier.border(u * 0.8f, Color.White, CircleShape)

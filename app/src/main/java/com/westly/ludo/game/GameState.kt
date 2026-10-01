@@ -58,6 +58,14 @@ class LudoGame(val tournament: Boolean = false) {
     /** -1 = nothing chosen yet, 0 = first die (blue), 1 = second die (green), 2 = total (red). */
     var selectedDie by mutableIntStateOf(-1)
 
+    /**
+     * DISPLAY ONLY. The option (0/1/2) the computer has internally decided on and its hand has
+     * reached, so the board can show the same highlight/glow. No rule or move ever reads this:
+     * the computer plays through [executeMove], never through [selectDie] / [selectedDie].
+     */
+    var computerOption by mutableIntStateOf(-1)
+        private set
+
     /** Set when the player taps a spot holding several movable pieces: they must pick one. */
     var pick by mutableStateOf<PiecePick?>(null)
 
@@ -171,7 +179,7 @@ class LudoGame(val tournament: Boolean = false) {
     /** True for pieces that may move with the currently selected option. Nothing glows before a choice. */
     private fun isGlowing(piece: Piece): Boolean {
         if (phase != Phase.Choose) return false
-        val i = selectedDie
+        val i = if (isComputerTurn) computerOption else selectedDie
         if (i !in 0..2) return false
         if (piece.color !in colorsOf(activePlayer)) return false
         return canUse(piece, i)
@@ -262,7 +270,7 @@ class LudoGame(val tournament: Boolean = false) {
             Phase.AwaitRoll -> HandTarget.Dice
             Phase.Choose -> {
                 val m = plannedMove ?: return null
-                if (selectedDie == -1) HandTarget.Orb(m.option) else spotOf(m.piece)
+                if (computerOption == -1) HandTarget.Orb(m.option) else spotOf(m.piece)
             }
             Phase.CaptureChoose -> plannedVictim?.let { spotOf(it) }
             else -> null
@@ -290,24 +298,27 @@ class LudoGame(val tournament: Boolean = false) {
                         plannedMove = move
                         delay(800)                        // hand points at the movement circle
                         if (paused) { plannedMove = null; return }
-                        selectDie(move.option)
+                        computerOption = move.option      // display only: hand moves on to the seed
                         delay(700)                        // hand moves to the seed
                         if (paused) { plannedMove = null; return }
-                        choosePiece(move.piece)
+                        // The computer's own internal move: no human dice control is used.
+                        executeMove(move.piece, move.option)
                         plannedMove = null
+                        computerOption = -1
                     }
                     Phase.CaptureChoose -> {
                         val victim = ai.chooseVictim(this) ?: return
                         plannedVictim = victim
                         delay(900)
                         if (paused) { plannedVictim = null; return }
-                        onPiecePicked(victim)
+                        resolveCapture(victim)            // internal: not the human pick handler
                         plannedVictim = null
                     }
                     else -> return
                 }
             }
         } finally {
+            computerOption = -1
             computerBusy = false
         }
     }
@@ -469,6 +480,7 @@ class LudoGame(val tournament: Boolean = false) {
         used1 = false
         used2 = false
         selectedDie = -1
+        computerOption = -1
         face1 = 3
         face2 = 4
         phase = Phase.AwaitRoll
@@ -522,6 +534,7 @@ class LudoGame(val tournament: Boolean = false) {
 
     /** The player taps the blue (0), green (1) or red total (2) circle to decide what to move by. */
     fun selectDie(i: Int) {
+        if (isComputerTurn) return   // human-only control: a computer never uses it
         if (phase != Phase.Choose) return
         if (!optionUsable(i)) return
         pick = null
@@ -533,28 +546,47 @@ class LudoGame(val tournament: Boolean = false) {
      * (same-spot choice) or which opponent seed to capture.
      */
     suspend fun onPiecePicked(tag: Any?) {
+        if (isComputerTurn) return   // human-only input: a computer never uses it
         val piece = tag as? Piece ?: return
         if (phase == Phase.CaptureChoose) {
-            val mover = pendingMover ?: return
-            if (pick?.items?.any { it.tag === piece } != true) return
-            pick = null
-            pendingMover = null
-            phase = Phase.Moving
-            capture(mover, piece)
-            finishMove()
+            resolveCapture(piece)
             return
         }
         pick = null
         choosePiece(piece)
     }
 
+    /** Applies the chosen capture once (human choice or computer decision). Leaves CaptureChoose first. */
+    private suspend fun resolveCapture(victim: Piece) {
+        if (phase != Phase.CaptureChoose) return
+        val mover = pendingMover ?: return
+        if (pick?.items?.any { it.tag === victim } != true) return
+        pick = null
+        pendingMover = null
+        phase = Phase.Moving
+        capture(mover, victim)
+        finishMove()
+    }
+
     fun dismissPick() {
         pick = null
     }
 
+    /** HUMAN path: the seed the player tapped, moved with the circle the player selected. */
     private suspend fun choosePiece(piece: Piece) {
         if (!isGlowing(piece)) return
-        val dieIndex = selectedDie
+        executeMove(piece, selectedDie)
+    }
+
+    /**
+     * The one place a move is carried out, for the human and for every computer. It re-checks the
+     * move against the shared rules and spends the dice exactly once: the phase leaves Choose
+     * before anything else happens, so a repeated call can never move or count twice.
+     */
+    private suspend fun executeMove(piece: Piece, dieIndex: Int) {
+        if (phase != Phase.Choose) return
+        if (dieIndex !in 0..2) return
+        if (piece !in ownPieces() || !canUse(piece, dieIndex)) return
         val base = optionValue(dieIndex)
         // 5 + 5 rule: this seed may not stop on an opponent, so it also takes the other die.
         val forced = dieIndex != 2 && forcedContinuation(piece, dieIndex)
@@ -675,6 +707,7 @@ class LudoGame(val tournament: Boolean = false) {
 
     /** Called with a tap position in board grid units. */
     suspend fun onBoardTap(row: Float, col: Float) {
+        if (isComputerTurn) return   // human-only input
         when (phase) {
             Phase.AwaitRoll -> {
                 if (row in 6f..9f && col in 6f..9f) roll()
