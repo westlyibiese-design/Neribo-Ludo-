@@ -3,6 +3,7 @@ package com.westly.ludo.game
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -27,7 +28,7 @@ class Piece(val color: LudoColor, val slot: Int) {
     var progress by mutableIntStateOf(Route.IN_HOUSE)
     var finishRank by mutableIntStateOf(-1)
 
-    /** A winning seed: it reached the center, or it captured an opponent seed. */
+    /** A winning seed for this round: it reached the center, or it captured an opponent seed. */
     var won by mutableStateOf(false)
 }
 
@@ -43,6 +44,9 @@ class LudoGame {
     var phase by mutableStateOf(Phase.AwaitRoll)
     var activePlayer by mutableIntStateOf(0)
     var winner by mutableIntStateOf(-1)
+
+    /** Match score of Player 1 (index 0) and Player 2 (index 1). It survives round resets. */
+    val scores = mutableStateListOf(0, 0)
 
     // The two dice values (0 = not rolled yet) and whether each has been used this turn.
     var die1 by mutableIntStateOf(0)
@@ -198,6 +202,7 @@ class LudoGame {
             else -> null
         }
         o.put("pendingMover", if (pm == null) -1 else pieces.indexOf(pm))
+        o.put("scores", JSONArray().put(scores[0]).put(scores[1]))
         o.put("activePlayer", activePlayer)
         o.put("winner", winner)
         o.put("die1", die1)
@@ -225,6 +230,11 @@ class LudoGame {
                 p.progress = a.getInt(0)
                 p.finishRank = a.getInt(1)
                 p.won = (a.length() > 2 && a.getInt(2) == 1) || p.progress == Route.CENTER
+            }
+            val sc = o.optJSONArray("scores")
+            if (sc != null && sc.length() == 2) {
+                scores[0] = sc.getInt(0)
+                scores[1] = sc.getInt(1)
             }
             movingPiece = null
             pendingMover = null
@@ -269,9 +279,8 @@ class LudoGame {
 
     /** Works out where a restored mid-turn game should continue, without any waiting. */
     private fun resumeTurn() {
-        if (ownPieces().all { it.progress == Route.CENTER }) {
-            winner = activePlayer
-            phase = Phase.GameOver
+        if (ownPieces().all { it.won }) {
+            completeRound()
             return
         }
         val usable = usableOptions()
@@ -290,7 +299,21 @@ class LudoGame {
         phase = Phase.AwaitRoll
     }
 
+    /** Starts a whole new match: scores go back to 0. */
     fun newGame() {
+        scores[0] = 0
+        scores[1] = 0
+        resetRound()
+    }
+
+    /** All 8 seeds of the active player are winning seeds: that player scores 1, then a fresh round starts. */
+    private fun completeRound() {
+        scores[activePlayer] = scores[activePlayer] + 1
+        resetRound()
+    }
+
+    /** Fresh round: every seed back in its house, no winning seeds, clean dice. Scores are kept. */
+    private fun resetRound() {
         for (p in pieces) {
             p.progress = Route.IN_HOUSE
             p.finishRank = -1
@@ -300,6 +323,7 @@ class LudoGame {
         pendingMover = null
         returning = null
         pick = null
+        movedThisRoll = false
         activePlayer = 0
         winner = -1
         die1 = 0
@@ -433,10 +457,12 @@ class LudoGame {
     }
 
     private suspend fun finishMove() {
-        if (ownPieces().all { it.progress == Route.CENTER }) {
-            winner = activePlayer
-            phase = Phase.GameOver
+        // The 8th winning seed (capture or home) ends the round: +1 score, then a fresh round.
+        if (ownPieces().all { it.won }) {
+            phase = Phase.Pausing
             sounds.win()
+            delay(700)
+            completeRound()
             return
         }
         afterDiceChange()
@@ -459,7 +485,6 @@ class LudoGame {
     private fun applyCapture(mover: Piece, victim: Piece) {
         victim.progress = Route.IN_HOUSE
         victim.finishRank = -1
-        victim.won = false
         mover.won = true
     }
 
@@ -512,7 +537,7 @@ class LudoGame {
                 if (row in 6f..9f && col in 6f..9f) roll()
             }
             Phase.GameOver -> {
-                if (row in 6f..9f && col in 6f..9f) newGame()
+                if (row in 6f..9f && col in 6f..9f) resetRound()
             }
             Phase.Choose -> {
                 // Any tap while a popup is open first closes it (its own buttons handle their own taps).

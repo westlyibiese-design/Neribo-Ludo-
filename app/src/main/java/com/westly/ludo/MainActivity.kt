@@ -124,12 +124,12 @@ fun LudoScreen(game: LudoGame) {
                     ExitButton(u * 11.8f, Modifier.align(Alignment.TopEnd).padding(end = u * 1f, top = u * 1f))
                     PointingHand(u * 10f, Modifier.align(Alignment.TopCenter))
                     PlayerBadge(
-                        "Player 2", 0, u,
+                        "Player 2", game.scores[1], u,
                         Modifier.align(Alignment.BottomStart).padding(start = u * 12f)
                             .alpha(if (game.activePlayer == 1) 1f else 0.5f)
                     )
                     PlayerBadge(
-                        "Player 1", 0, u,
+                        "Player 1", game.scores[0], u,
                         Modifier.align(Alignment.BottomEnd).padding(end = u * 11f)
                             .alpha(if (game.activePlayer == 0) 1f else 0.5f)
                     )
