@@ -32,6 +32,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -90,7 +91,9 @@ fun LudoBoard(
     /** Yard names in the order green, yellow, red, blue. */
     yardLabels: List<String> = listOf("Player 2", "Player 1", "Player 1", "Player 2"),
     /** Yard pictures in the order green, yellow, red, blue. Empty = the normal colored yards. */
-    yardImages: List<ImageBitmap?> = emptyList()
+    yardImages: List<ImageBitmap?> = emptyList(),
+    /** Tournament: true = that player is knocked out (yard dimmed with OUT). Order green, yellow, red, blue. */
+    outYards: List<Boolean> = emptyList()
 ) {
     val measurer = rememberTextMeasurer()
     val tapHandler = rememberUpdatedState(onBoardTap)
@@ -111,7 +114,7 @@ fun LudoBoard(
         ) {
             // The static board sits on its own layer so it is not redrawn while pieces move.
             Canvas(Modifier.fillMaxSize().graphicsLayer { }) {
-                drawLudoBoard(leftDie, rightDie, measurer, pieces == null, yardLabels, yardImages)
+                drawLudoBoard(leftDie, rightDie, measurer, pieces == null, yardLabels, yardImages, outYards)
             }
             if (pieces != null) {
                 Canvas(Modifier.fillMaxSize()) {
@@ -164,7 +167,8 @@ private fun DrawScope.drawLudoBoard(
     measurer: TextMeasurer,
     seeds: Boolean,
     labels: List<String>,
-    images: List<ImageBitmap?>
+    images: List<ImageBitmap?>,
+    outs: List<Boolean>
 ) {
     val s = size.minDimension
     val pad = s * PAD_FRAC
@@ -180,7 +184,7 @@ private fun DrawScope.drawLudoBoard(
     drawRoundRect(Palette.Cream, Offset(m.ox, m.oy), Size(boardSide, boardSide), boardCorner)
 
     drawPathCells(m)
-    drawYards(m, measurer, seeds, labels, images)
+    drawYards(m, measurer, seeds, labels, images, outs)
     drawCenter(m)
     drawPathArrows(m)
 
@@ -271,12 +275,13 @@ private fun DrawScope.drawYards(
     measurer: TextMeasurer,
     seeds: Boolean,
     labels: List<String>,
-    images: List<ImageBitmap?>
+    images: List<ImageBitmap?>,
+    outs: List<Boolean>
 ) {
-    drawYard(m, 0, 0, Palette.Green, labels[0], measurer, seeds, images.getOrNull(0))
-    drawYard(m, 0, 9, Palette.Yellow, labels[1], measurer, seeds, images.getOrNull(1))
-    drawYard(m, 9, 0, Palette.Red, labels[2], measurer, seeds, images.getOrNull(2))
-    drawYard(m, 9, 9, Palette.Blue, labels[3], measurer, seeds, images.getOrNull(3))
+    drawYard(m, 0, 0, Palette.Green, labels[0], measurer, seeds, images.getOrNull(0), outs.getOrNull(0) == true)
+    drawYard(m, 0, 9, Palette.Yellow, labels[1], measurer, seeds, images.getOrNull(1), outs.getOrNull(1) == true)
+    drawYard(m, 9, 0, Palette.Red, labels[2], measurer, seeds, images.getOrNull(2), outs.getOrNull(2) == true)
+    drawYard(m, 9, 9, Palette.Blue, labels[3], measurer, seeds, images.getOrNull(3), outs.getOrNull(3) == true)
 }
 
 private fun DrawScope.drawYard(
@@ -287,7 +292,8 @@ private fun DrawScope.drawYard(
     label: String,
     measurer: TextMeasurer,
     seeds: Boolean,
-    image: ImageBitmap?
+    image: ImageBitmap?,
+    out: Boolean
 ) {
     val c = m.cell
     val tl = Offset(m.x(col.toFloat()), m.y(row.toFloat()))
@@ -364,6 +370,27 @@ private fun DrawScope.drawYard(
                 drawSeed(tl + Offset(c * dx, c * dy), c * 0.66f, sw)
             }
         }
+    }
+
+    // Knocked out (Tournament): the whole yard is dimmed and a big red OUT sits in the middle.
+    if (out) {
+        drawRoundRect(Color.Black.copy(alpha = 0.66f), tl, yardSize, corner)
+        val big = TextStyle(fontSize = (c * 2.1f).toSp(), fontWeight = FontWeight.ExtraBold)
+        val outline = measurer.measure(
+            text = "OUT",
+            style = big.copy(color = Color.Black, drawStyle = Stroke(width = c * 0.22f, join = StrokeJoin.Round)),
+            maxLines = 1,
+            softWrap = false
+        )
+        val fill = measurer.measure(
+            text = "OUT",
+            style = big.copy(color = Color(0xFFFF3B30)),
+            maxLines = 1,
+            softWrap = false
+        )
+        val pos = Offset(tl.x + c * 3f - fill.size.width / 2f, tl.y + c * 3.2f - fill.size.height / 2f)
+        drawText(textLayoutResult = outline, topLeft = pos)
+        drawText(textLayoutResult = fill, topLeft = pos)
     }
 
     // Player name in the top band of the yard

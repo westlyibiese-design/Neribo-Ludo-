@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
@@ -245,7 +247,7 @@ fun HomeScreen(onSettings: () -> Unit, onGame: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings: visual only. The rows do nothing in this phase.
+// Settings: Settings (sound & vibration), Rules, Configuration, Change Names.
 // ---------------------------------------------------------------------------
 
 private fun DrawScope.gearIcon(c: Offset, r: Float) {
@@ -326,7 +328,13 @@ private fun SettingsRow(
 }
 
 @Composable
-fun SettingsScreen(names: PlayerNames, onConfiguration: () -> Unit, onClose: () -> Unit) {
+fun SettingsScreen(
+    names: PlayerNames,
+    onSound: () -> Unit,
+    onRules: () -> Unit,
+    onConfiguration: () -> Unit,
+    onClose: () -> Unit
+) {
     var namesOpen by remember { mutableStateOf(false) }
     // Soft entrance: fade and grow a little.
     val enter = remember { Animatable(0f) }
@@ -362,9 +370,9 @@ fun SettingsScreen(names: PlayerNames, onConfiguration: () -> Unit, onClose: () 
                         )
                     }
                     Spacer(Modifier.height(u * 8f))
-                    SettingsRow("Settings", Palette.Blue, u) { c, r -> gearIcon(c, r) }
+                    SettingsRow("Settings", Palette.Blue, u, onClick = onSound) { c, r -> gearIcon(c, r) }
                     Spacer(Modifier.height(u * 4f))
-                    SettingsRow("Rules", Palette.Green, u) { c, r -> rulesIcon(c, r) }
+                    SettingsRow("Rules", Palette.Green, u, onClick = onRules) { c, r -> rulesIcon(c, r) }
                     Spacer(Modifier.height(u * 4f))
                     SettingsRow("Configuration", Palette.Yellow, u, onClick = onConfiguration) { c, r -> configIcon(c, r) }
                     Spacer(Modifier.height(u * 4f))
@@ -495,6 +503,136 @@ fun ConfigurationScreen(settings: GameSettings, onClose: () -> Unit) {
                         OptionChip(labels[i], settings.level == i, u, u * 27f) { settings.chooseLevel(i) }
                     }
                 }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sound & Vibration
+// ---------------------------------------------------------------------------
+
+@Composable
+fun SoundVibrationScreen(settings: GameSettings, onClose: () -> Unit) {
+    MenuBackground(R.drawable.bg_settings) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val u = minOf(maxWidth / 100f, maxHeight / 150f)
+            Column(
+                Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Box(Modifier.fillMaxWidth().padding(horizontal = u * 3f)) {
+                    GlossButton(
+                        "Sound & Vibration", Palette.Orange, u * 68f, u * 14f,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                    ExitButton(
+                        u * 11.8f,
+                        Modifier.align(Alignment.CenterEnd).clickable { onClose() }
+                    )
+                }
+                Spacer(Modifier.height(u * 8f))
+
+                SectionLabel("Sound", u)
+                Row(horizontalArrangement = Arrangement.spacedBy(u * 2f)) {
+                    OptionChip("On", settings.soundOn, u, u * 27f) { settings.chooseSound(true) }
+                    OptionChip("Off", !settings.soundOn, u, u * 27f) { settings.chooseSound(false) }
+                }
+                Spacer(Modifier.height(u * 5f))
+
+                SectionLabel("Vibration", u)
+                Row(horizontalArrangement = Arrangement.spacedBy(u * 2f)) {
+                    OptionChip("On", settings.vibrationOn, u, u * 27f) { settings.chooseVibration(true) }
+                    OptionChip("Off", !settings.vibrationOn, u, u * 27f) { settings.chooseVibration(false) }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// How to Play (Rules). Every line below describes what the game code really does.
+// ---------------------------------------------------------------------------
+
+private val RulesText: List<Pair<String, String>> = listOf(
+    "Rolling" to "Tap the dice in the middle of the board to roll. You roll two dice. Under the board " +
+        "you get three circles: blue is the first die, green is the second die, and red is both dice added together.",
+    "Moving" to "Tap a circle, then tap a glowing seed to move it that many steps. If two or more of your seeds " +
+        "stand on the same spot, you choose which one moves. A seed can never go past the center.",
+    "Leaving the house" to "You need a 6 on one die to bring a seed out of its house. Use the blue or the green " +
+        "circle for it. The red total cannot bring a seed out.",
+    "Another roll" to "Only a double six (6 and 6) gives you another roll. A single 6 does not.",
+    "Capturing" to "If your seed stops on a square where an opponent seed stands, that opponent seed goes back to " +
+        "its house and needs a new 6. There are no safe squares, so this can happen anywhere on the path. " +
+        "If several opponent seeds stand there, you choose which one to capture. " +
+        "If one die would put your seed on an opponent, but no other seed of yours can use the second die, " +
+        "your seed must carry on and use the second die too.",
+    "Winning seeds" to "A seed is a winning seed when it reaches the center, or when it captures an opponent seed. " +
+        "A capturing seed leaves the board and counts as a winning seed.",
+    "You & Computer" to "You play two colors, yellow and red (8 seeds). The computer plays green and blue. " +
+        "Get all 8 of your seeds out as winning seeds to win the round and score 1 point.",
+    "Tournament" to "You play red against 3 computers. Each player has one color and 4 seeds.\n\n" +
+        "A round ends when one player gets all 4 seeds out. That player is safe and gets no point.\n\n" +
+        "One player is knocked out each round. It is the player with the fewest seeds out. " +
+        "If players are tied, the one whose seeds travelled the least goes out. " +
+        "If they are still tied, they each roll a die: the lowest roll goes out, and a tie for lowest rolls again.\n\n" +
+        "Round 1 has 4 players, Round 2 has 3 players, and Round 3 is the Final with 2 players. " +
+        "Every round starts fresh with all seeds in their houses.\n\n" +
+        "In the Final, the first player to get all 4 seeds out wins the tournament and gets 1 point.\n\n" +
+        "If you are knocked out, you can Watch the computers finish (tap Skip to speed them up) or Leave. " +
+        "If you leave, the player who won that round gets the point. " +
+        "If you resign from the menu, you are knocked out at once, and if you leave, the player in front gets the point.",
+    "Tips" to "The blue menu button (top left) lets you change names, restart the round, resign or exit. " +
+        "The orange X (top right) goes back to Game Mode. Your game is saved by itself, " +
+        "so you can close the app and come back."
+)
+
+@Composable
+fun RulesScreen(onClose: () -> Unit) {
+    MenuBackground(R.drawable.bg_settings) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val u = minOf(maxWidth / 100f, maxHeight / 150f)
+            val shape = RoundedCornerShape(u * 4f)
+            val headStyle = menuText((u * 4.4f).sp(), Palette.Orange.light).copy(textAlign = TextAlign.Start)
+            val bodyStyle = TextStyle(
+                color = Color.White,
+                fontSize = (u * 3.8f).sp(),
+                lineHeight = (u * 5.3f).sp(),
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Start
+            )
+            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Spacer(Modifier.height(u * 2f))
+                Box(Modifier.fillMaxWidth().padding(horizontal = u * 3f)) {
+                    GlossButton(
+                        "How to Play", Palette.Orange, u * 56f, u * 14f,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                    ExitButton(
+                        u * 11.8f,
+                        Modifier.align(Alignment.CenterEnd).clickable { onClose() }
+                    )
+                }
+                Spacer(Modifier.height(u * 3f))
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .width(u * 92f)
+                        .background(Color.Black.copy(alpha = 0.5f), shape)
+                        .border(1.dp, Palette.PillEdge, shape)
+                        .padding(horizontal = u * 4f, vertical = u * 3f)
+                ) {
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        for ((head, body) in RulesText) {
+                            BasicText(head, style = headStyle)
+                            Spacer(Modifier.height(u * 1f))
+                            BasicText(body, style = bodyStyle)
+                            Spacer(Modifier.height(u * 3.5f))
+                        }
+                    }
+                }
+                Spacer(Modifier.height(u * 1f))
             }
         }
     }

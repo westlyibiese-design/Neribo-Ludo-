@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -54,6 +55,7 @@ import com.westly.ludo.game.GameSettings
 import com.westly.ludo.game.Phase
 import com.westly.ludo.game.PlayerNames
 import com.westly.ludo.game.Sounds
+import com.westly.ludo.game.TOverlay
 import com.westly.ludo.ui.BoardThemes
 import com.westly.ludo.ui.ChangeNamesDialog
 import com.westly.ludo.ui.ConfigurationScreen
@@ -66,6 +68,13 @@ import com.westly.ludo.ui.HomeScreen
 import com.westly.ludo.ui.MenuDialog
 import com.westly.ludo.ui.NeriboFooter
 import com.westly.ludo.ui.ResignDialog
+import com.westly.ludo.ui.RoundBanner
+import com.westly.ludo.ui.RoundResultDialog
+import com.westly.ludo.ui.RulesScreen
+import com.westly.ludo.ui.SkipButton
+import com.westly.ludo.ui.SoundVibrationScreen
+import com.westly.ludo.ui.TieBreakDialog
+import com.westly.ludo.ui.YoureOutDialog
 import com.westly.ludo.ui.WinnerPage
 import com.westly.ludo.ui.LudoBoard
 import com.westly.ludo.ui.NeriboIntro
@@ -78,6 +87,7 @@ import com.westly.ludo.ui.Swatch
 import com.westly.ludo.ui.TurnPill
 import kotlin.math.sin
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -130,7 +140,7 @@ fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames, settings: 
     BackHandler(enabled = screen != "intro" && screen != "home") {
         screen = when (screen) {
             "game", "tournament" -> "modes"
-            "config" -> "settings"
+            "config", "sound", "rules" -> "settings"
             else -> "home"
         }
     }
@@ -140,7 +150,15 @@ fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames, settings: 
             when (s) {
                 "intro" -> NeriboIntro { screen = "home" }
                 "home" -> HomeScreen(onSettings = { screen = "settings" }, onGame = { screen = "modes" })
-                "settings" -> SettingsScreen(names, onConfiguration = { screen = "config" }, onClose = { screen = "home" })
+                "settings" -> SettingsScreen(
+                    names,
+                    onSound = { screen = "sound" },
+                    onRules = { screen = "rules" },
+                    onConfiguration = { screen = "config" },
+                    onClose = { screen = "home" }
+                )
+                "sound" -> SoundVibrationScreen(settings, onClose = { screen = "settings" })
+                "rules" -> RulesScreen(onClose = { screen = "settings" })
                 "config" -> ConfigurationScreen(settings, onClose = { screen = "settings" })
                 "modes" -> GameModeScreen(
                     onBack = { screen = "home" },
@@ -190,7 +208,10 @@ fun LudoScreen(
     // Computer players only play while this screen is showing; they stop at a clean moment.
     DisposableEffect(game) {
         game.paused = false
-        onDispose { game.paused = true }
+        onDispose {
+            game.paused = true
+            game.stopFast()   // spectator fast-forward never leaks sound-off into another screen
+        }
     }
     LaunchedEffect(game.phase, game.activePlayer, game.paused) {
         if (game.isComputerTurn && !game.paused) scope.launch { game.computerStep() }
@@ -210,7 +231,17 @@ fun LudoScreen(
 
     // Which pop-up is open: "none", "menu", "resign" or "names". Computers wait while one is open.
     var dialog by remember { mutableStateOf("none") }
-    LaunchedEffect(dialog) { game.paused = dialog != "none" }
+    // Computers also wait while a Tournament overlay (Tie-Break / Round Result / You're Out) or the round banner is showing.
+    val overlayOpen = tournament && game.overlay != TOverlay.NONE
+    val bannerOn = tournament && game.bannerPending
+    LaunchedEffect(dialog, overlayOpen, bannerOn) { game.paused = dialog != "none" || overlayOpen || bannerOn }
+    LaunchedEffect(game.bannerPending) {
+        if (tournament && game.bannerPending) {
+            delay(1500)
+            game.bannerPending = false
+        }
+    }
+    val bannerAlpha by animateFloatAsState(if (bannerOn) 1f else 0f, tween(300), label = "banner")
 
     Box(Modifier.fillMaxSize()) {
     Box(
@@ -243,6 +274,14 @@ fun LudoScreen(
                         u * 11.8f,
                         Modifier.align(Alignment.TopEnd).padding(end = u * 1f, top = u * 1f).clickable { onModes() }
                     )
+                    if (tournament && game.spectator && game.phase != Phase.GameOver) {
+                        // The human is only watching: Skip makes the computers play fast.
+                        SkipButton(
+                            u * 9.6f, game.fast,
+                            Modifier.align(Alignment.TopStart).padding(start = u * 1f, top = u * 14.2f)
+                                .clickable(enabled = !game.fast) { game.startFast() }
+                        )
+                    }
                     if (tournament) {
                         TurnPill(
                             turnText(game, names),
@@ -286,10 +325,12 @@ fun LudoScreen(
                     rollHint = game.phase == Phase.AwaitRoll,
                     pick = game.pick,
                     onPick = { tag -> if (!game.isComputerTurn) scope.launch { game.onPiecePicked(tag) } },
-                    onBoardTap = { row, col -> if (!game.isComputerTurn) scope.launch { game.onBoardTap(row, col) } },
+                    onBoardTap = { row, col -> if (!game.isComputerTurn && !game.bannerPending) scope.launch { game.onBoardTap(row, col) } },
                     yardLabels = if (tournament) listOf(names[1], names[2], names[0], names[3])
                     else listOf(names[1], names[0], names[0], names[1]),
-                    yardImages = yardImages
+                    yardImages = yardImages,
+                    // green, yellow, red, blue = players 1, 2, 0, 3
+                    outYards = if (tournament) listOf(!game.active[1], !game.active[2], !game.active[0], !game.active[3]) else emptyList()
                 )
 
                 // Bottom: dice indicators (blue = first die, red = total, green = second die)
@@ -339,6 +380,17 @@ fun LudoScreen(
                 },
                 u = u
             )
+
+            // Round banner: fades in and out over the board, takes no taps.
+            if (bannerAlpha > 0.01f) {
+                RoundBanner(
+                    game.roundTitle(), u,
+                    Modifier
+                        .align(Alignment.Center)
+                        .offset(y = boardTop + boardSide / 2f - maxHeight / 2f)
+                        .alpha(bannerAlpha)
+                )
+            }
         }
     }
 
@@ -354,10 +406,15 @@ fun LudoScreen(
                 dialog = "none"
                 onHome()
             },
-            onClose = { dialog = "none" }
+            onClose = { dialog = "none" },
+            resignEnabled = !(tournament && !game.active[0])
         )
         "resign" -> ResignDialog(
-            message = "A point will be awarded to ${names[game.resignBeneficiary(0)]}. Do you want to resign?",
+            message = if (tournament && game.activeCount() > 2) {
+                "You will be knocked out of the tournament. Do you want to resign?"
+            } else {
+                "A point will be awarded to ${names[game.resignBeneficiary(0)]}. Do you want to resign?"
+            },
             onConfirm = {
                 dialog = "none"
                 scope.launch { game.resign(0) }
@@ -365,6 +422,44 @@ fun LudoScreen(
             onCancel = { dialog = "menu" }
         )
         "names" -> ChangeNamesDialog(names, onClose = { dialog = "none" })
+    }
+
+    if (tournament) {
+        val colorNames = listOf("Red", "Green", "Yellow", "Blue")
+        when (game.overlay) {
+            TOverlay.TIEBREAK -> {
+                TieBreakDialog(
+                    names = names.names.toList(),
+                    tied = game.tieIds,
+                    rolls = game.tieRolls.toList(),
+                    rolling = game.tieRolling,
+                    flicker = game.tieFlicker,
+                    humanCanRoll = 0 in game.tieIds && game.tieRolls[0] == 0 && game.tieRolling < 0,
+                    onRoll = { scope.launch { game.tieHumanRoll() } }
+                )
+                // The roll-off runs while this screen is open; leaving the screen stops it safely.
+                LaunchedEffect(Unit) { game.runTieBreak() }
+            }
+            TOverlay.RESULT -> RoundResultDialog(
+                title = "Round ${game.round} Result",
+                outLine = "${names[game.resultOut]} (${colorNames.getOrElse(game.resultOut) { "" }}) is OUT",
+                names = names.names.toList(),
+                seeds = game.resultSeeds,
+                outPlayer = game.resultOut,
+                auto = game.spectator,
+                fast = game.fast,
+                onNext = { game.resultNext() }
+            )
+            TOverlay.OUT -> {
+                val to = if (game.leaveTo in 0..3) game.leaveTo else 1
+                YoureOutDialog(
+                    message = (if (game.resultResigned) "You resigned.\n" else "You are out of the tournament.\n") +
+                        "Watch the rest, or leave now.\nIf you leave, ${names[to]} gets the point.",
+                    onWatch = { game.outWatch() },
+                    onLeave = { game.outLeave() }
+                )
+            }
+        }
     }
 
     if (over) {

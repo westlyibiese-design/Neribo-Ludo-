@@ -21,7 +21,15 @@ import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 
-enum class Phase { AwaitRoll, Rolling, Choose, Moving, Pausing, CaptureChoose, GameOver }
+enum class Phase { AwaitRoll, Rolling, Choose, Moving, Pausing, CaptureChoose, GameOver, RoundBreak }
+
+/** Which Tournament overlay (Tie-Break, Round Result, You're Out) is open, if any. */
+object TOverlay {
+    const val NONE = "none"
+    const val TIEBREAK = "tiebreak"
+    const val RESULT = "result"
+    const val OUT = "out"
+}
 
 class Piece(val color: LudoColor, val slot: Int) {
     /** -1 = in house, 0..55 = on the route, 56 = reached the center, 57 = banked after a capture. */
@@ -49,6 +57,59 @@ class LudoGame(val tournament: Boolean = false) {
     /** Match score of Player 1 (index 0) and Player 2 (index 1). It survives round resets. */
     val playerCount: Int = if (tournament) 4 else 2
     val scores = mutableStateListOf<Int>().apply { repeat(playerCount) { add(0) } }
+
+    // ------------------------------------------------------------------
+    // Tournament elimination state (only used when tournament = true).
+    // Players 0..3 = red (the human), green, yellow, blue.
+    // ------------------------------------------------------------------
+
+    /** Which players are still in the tournament (index = player). */
+    val active = mutableStateListOf(true, true, true, true)
+
+    /** 1 = four players, 2 = three players, 3 = the final (two players). */
+    var round by mutableIntStateOf(1)
+
+    /** Players knocked out so far, in the order they went out. */
+    val eliminatedOrder = mutableStateListOf<Int>()
+
+    /** True when the human was knocked out and chose to watch the computers finish. */
+    var spectator by mutableStateOf(false)
+
+    /** One of [TOverlay]: which overlay is open over the board. */
+    var overlay by mutableStateOf(TOverlay.NONE)
+
+    /** The player who ended the last round (got all 4 seeds out), or -1 (resign). */
+    var resultEnder by mutableIntStateOf(-1)
+
+    /** The player knocked out by the last round (or by resigning), or -1. */
+    var resultOut by mutableIntStateOf(-1)
+
+    /** Players who took part in the round that just ended. */
+    var resultPlayers by mutableStateOf<List<Int>>(emptyList())
+
+    /** Seeds out per player when the round ended (-1 = not in that round). */
+    var resultSeeds by mutableStateOf<List<Int>>(listOf(0, 0, 0, 0))
+
+    /** True when the human is out because of Resign (no Round Result was shown). */
+    var resultResigned by mutableStateOf(false)
+
+    /** Who gets the point if the human chooses Leave on the You're Out screen. */
+    var leaveTo by mutableIntStateOf(-1)
+
+    /** Players in the current dice roll-off, and their rolls so far (0 = not rolled yet). */
+    var tieIds by mutableStateOf<List<Int>>(emptyList())
+    val tieRolls = mutableStateListOf(0, 0, 0, 0)
+
+    /** Display only: who is rolling right now (-1 = nobody) and the face shown while rolling. */
+    var tieRolling by mutableIntStateOf(-1)
+    var tieFlicker by mutableIntStateOf(1)
+
+    /** Spectator fast-forward: computers play about 4 times faster, without sound. */
+    var fast by mutableStateOf(false)
+        private set
+
+    /** True while the round banner is showing (computers and taps wait). Not saved. */
+    var bannerPending by mutableStateOf(tournament)
 
     // The two dice values (0 = not rolled yet) and whether each has been used this turn.
     var die1 by mutableIntStateOf(0)
@@ -203,7 +264,7 @@ class LudoGame(val tournament: Boolean = false) {
     private var halting = false
 
     val isComputerTurn: Boolean
-        get() = activePlayer in computerSeats && phase != Phase.GameOver && !halting
+        get() = activePlayer in computerSeats && phase != Phase.GameOver && phase != Phase.RoundBreak && !halting
 
     /** The color a player controls in Tournament (index 0..3). */
     fun tournamentColor(player: Int): LudoColor = TOURNAMENT_COLORS[player]
@@ -223,6 +284,10 @@ class LudoGame(val tournament: Boolean = false) {
 
     private var computerBusy = false
     private val stopComputer: Boolean get() = paused || halting
+
+    /** Waiting-time multiplier for the computer: normal speed setting, 4 times shorter in fast-forward. */
+    private val fastMul: Float get() = if (fast) 0.25f else 1f
+    private val pace: Float get() = computerSpeed * fastMul
     private val computers: List<ComputerPlayer> =
         if (tournament) (1..3).map { ComputerPlayer(it, listOf(TOURNAMENT_COLORS[it])) }
         else listOf(ComputerPlayer(1, listOf(LudoColor.GREEN, LudoColor.BLUE)))
@@ -297,17 +362,17 @@ class LudoGame(val tournament: Boolean = false) {
                 val ai = computers.first { it.playerIndex == activePlayer }
                 when (phase) {
                     Phase.AwaitRoll -> {
-                        delay((1000 * computerSpeed).toLong())                       // hand reaches the dice
+                        delay((1000 * pace).toLong())                       // hand reaches the dice
                         if (stopComputer) return
                         roll()
                     }
                     Phase.Choose -> {
                         val move = ai.chooseMove(this) ?: return
                         plannedMove = move
-                        delay((800 * computerSpeed).toLong())                        // hand points at the movement circle
+                        delay((800 * pace).toLong())                        // hand points at the movement circle
                         if (stopComputer) { plannedMove = null; return }
                         computerOption = move.option      // display only: hand moves on to the seed
-                        delay((700 * computerSpeed).toLong())                        // hand moves to the seed
+                        delay((700 * pace).toLong())                        // hand moves to the seed
                         if (stopComputer) { plannedMove = null; return }
                         // The computer's own internal move: no human dice control is used.
                         executeMove(move.piece, move.option)
@@ -317,7 +382,7 @@ class LudoGame(val tournament: Boolean = false) {
                     Phase.CaptureChoose -> {
                         val victim = ai.chooseVictim(this) ?: return
                         plannedVictim = victim
-                        delay((900 * computerSpeed).toLong())
+                        delay((900 * pace).toLong())
                         if (stopComputer) { plannedVictim = null; return }
                         resolveCapture(victim)            // internal: not the human pick handler
                         plannedVictim = null
@@ -348,6 +413,7 @@ class LudoGame(val tournament: Boolean = false) {
                 Phase.AwaitRoll, Phase.Rolling -> "AwaitRoll"
                 Phase.Choose -> "Choose"
                 Phase.GameOver -> "GameOver"
+                Phase.RoundBreak -> "RoundBreak"
                 Phase.CaptureChoose -> "Capture"
                 Phase.Moving, Phase.Pausing -> "Resolve"
             }
@@ -370,6 +436,21 @@ class LudoGame(val tournament: Boolean = false) {
         o.put("face1", face1)
         o.put("face2", face2)
         o.put("movedThisRoll", movedThisRoll)
+        if (tournament) {
+            o.put("tActive", JSONArray().also { a -> active.forEach { a.put(it) } })
+            o.put("tRound", round)
+            o.put("tElim", JSONArray().also { a -> eliminatedOrder.forEach { a.put(it) } })
+            o.put("tSpectator", spectator)
+            o.put("tOverlay", overlay)
+            o.put("tEnder", resultEnder)
+            o.put("tOut", resultOut)
+            o.put("tPlayers", JSONArray().also { a -> resultPlayers.forEach { a.put(it) } })
+            o.put("tSeeds", JSONArray().also { a -> resultSeeds.forEach { a.put(it) } })
+            o.put("tResigned", resultResigned)
+            o.put("tLeaveTo", leaveTo)
+            o.put("tTieIds", JSONArray().also { a -> tieIds.forEach { a.put(it) } })
+            o.put("tTieRolls", JSONArray().also { a -> tieRolls.forEach { a.put(it) } })
+        }
         return o.toString()
     }
 
@@ -398,7 +479,10 @@ class LudoGame(val tournament: Boolean = false) {
             pendingMover = null
             returning = null
             pick = null
+            if (tournament) restoreTournament(o)
             activePlayer = o.getInt("activePlayer")
+            if (tournament && activePlayer !in 0..3) activePlayer = firstActive()
+            if (tournament && !active[activePlayer]) activePlayer = firstActive()
             winner = o.getInt("winner")
             die1 = o.getInt("die1")
             die2 = o.getInt("die2")
@@ -412,13 +496,45 @@ class LudoGame(val tournament: Boolean = false) {
             when (o.getString("phase")) {
                 "GameOver" -> phase = Phase.GameOver
                 "AwaitRoll" -> phase = Phase.AwaitRoll
+                "RoundBreak" -> {
+                    phase = Phase.RoundBreak
+                    // A break with no overlay cannot happen normally: just start the round again.
+                    if (!tournament || overlay == TOverlay.NONE) resetRound()
+                }
                 else -> restorePending(if (pm >= 0) pieces.getOrNull(pm) else null)
             }
+            bannerPending = false
             true
         } catch (e: Exception) {
             newGame()
             false
         }
+    }
+
+    /** Loads the Tournament elimination fields. An older save without them is a normal 4-player Round 1. */
+    private fun restoreTournament(o: JSONObject) {
+        val ac = o.optJSONArray("tActive")
+        for (i in 0 until 4) active[i] = if (ac != null && ac.length() == 4) ac.optBoolean(i, true) else true
+        if (activeCount() < 2) for (i in 0 until 4) active[i] = true
+        round = o.optInt("tRound", 1).coerceIn(1, 3)
+        eliminatedOrder.clear()
+        o.optJSONArray("tElim")?.let { a -> for (i in 0 until a.length()) eliminatedOrder.add(a.getInt(i)) }
+        spectator = o.optBoolean("tSpectator", false) && !active[0]
+        resultEnder = o.optInt("tEnder", -1)
+        resultOut = o.optInt("tOut", -1)
+        resultPlayers = o.optJSONArray("tPlayers")?.let { a -> (0 until a.length()).map { a.getInt(it) } } ?: emptyList()
+        resultSeeds = o.optJSONArray("tSeeds")?.let { a -> (0 until a.length()).map { a.getInt(it) } }
+            ?.takeIf { it.size == 4 } ?: listOf(0, 0, 0, 0)
+        resultResigned = o.optBoolean("tResigned", false)
+        leaveTo = o.optInt("tLeaveTo", -1)
+        tieIds = o.optJSONArray("tTieIds")?.let { a -> (0 until a.length()).map { a.getInt(it) } } ?: emptyList()
+        val tr = o.optJSONArray("tTieRolls")
+        for (i in 0 until 4) tieRolls[i] = tr?.optInt(i, 0) ?: 0
+        tieRolling = -1
+        val ov = o.optString("tOverlay", TOverlay.NONE)
+        overlay = if (ov == TOverlay.TIEBREAK || ov == TOverlay.RESULT || ov == TOverlay.OUT) ov else TOverlay.NONE
+        if (overlay == TOverlay.TIEBREAK && tieIds.size < 2) overlay = TOverlay.NONE
+        stopFast()
     }
 
     /** A restored game may still owe a capture on the cell where a seed had just landed. */
@@ -453,18 +569,26 @@ class LudoGame(val tournament: Boolean = false) {
         used1 = false
         used2 = false
         selectedDie = -1
-        if (!extraRoll) activePlayer = (activePlayer + 1) % playerCount
+        if (!extraRoll) activePlayer = nextPlayer(activePlayer)
         phase = Phase.AwaitRoll
     }
 
     /** Starts a whole new match: scores go back to 0. */
     fun newGame() {
         for (i in 0 until playerCount) scores[i] = 0
+        if (tournament) {
+            resetTournamentState()
+            bannerPending = true
+        }
         resetRound()
     }
 
     /** All winning seeds of the active player are home or captured: that player scores 1 and the winner page shows. */
     private fun completeRound() {
+        if (tournament) {
+            tournamentRoundEnded(activePlayer)
+            return
+        }
         scores[activePlayer] = scores[activePlayer] + 1
         winner = activePlayer
         pick = null
@@ -474,10 +598,15 @@ class LudoGame(val tournament: Boolean = false) {
 
     /** Starts the next round with the same players and mode. Scores are kept. */
     fun nextGame() {
+        if (tournament) {
+            // A new tournament: everybody is back in, scores are kept.
+            resetTournamentState()
+            bannerPending = true
+        }
         resetRound()
     }
 
-    private val stablePhases = setOf(Phase.AwaitRoll, Phase.Choose, Phase.CaptureChoose, Phase.GameOver)
+    private val stablePhases = setOf(Phase.AwaitRoll, Phase.Choose, Phase.CaptureChoose, Phase.GameOver, Phase.RoundBreak)
 
     /** Waits (up to about 20 seconds) until no move or computer action is half way through. */
     private suspend fun settle() {
@@ -518,14 +647,21 @@ class LudoGame(val tournament: Boolean = false) {
     /** Who receives the point if [player] resigns right now: the opponent, or the tournament leader. */
     fun resignBeneficiary(player: Int = 0): Int =
         if (!tournament) (player + 1) % playerCount
-        else leaderAmong((0 until playerCount).filter { it != player })
+        else leaderAmong(
+            (0 until playerCount).filter { it != player && active[it] }
+                .ifEmpty { listOf((player + 1) % playerCount) }
+        )
 
     /** Menu > Resign: the point goes to [resignBeneficiary] and the winner page shows. */
     suspend fun resign(player: Int = 0) {
         halting = true
         try {
             settle()
-            if (phase == Phase.GameOver) return
+            if (phase == Phase.GameOver || phase == Phase.RoundBreak) return
+            if (tournament) {
+                tournamentResign(player)
+                return
+            }
             val to = resignBeneficiary(player)
             scores[to] = scores[to] + 1
             winner = to
@@ -550,7 +686,7 @@ class LudoGame(val tournament: Boolean = false) {
         returning = null
         pick = null
         movedThisRoll = false
-        activePlayer = 0
+        activePlayer = if (tournament) firstActive() else 0
         winner = -1
         die1 = 0
         die2 = 0
@@ -563,6 +699,242 @@ class LudoGame(val tournament: Boolean = false) {
         phase = Phase.AwaitRoll
     }
 
+    // ------------------------------------------------------------------
+    // Tournament elimination.
+    // A round ends when one active player has all 4 seeds out. That player is safe and gets no
+    // point. One other player is knocked out. Rounds: 4 -> 3 -> 2 players (the final).
+    // Only the winner of the final (or the player a leaving human hands the point to) scores.
+    // ------------------------------------------------------------------
+
+    fun activeCount(): Int = active.count { it }
+
+    private fun firstActive(): Int = (0 until 4).firstOrNull { active[it] } ?: 0
+
+    /** The next player still in the tournament after [from]: 0 -> 1 -> 2 -> 3 -> 0. */
+    private fun nextActiveAfter(from: Int): Int {
+        for (step in 1..4) {
+            val p = (((from + step) % 4) + 4) % 4
+            if (active[p]) return p
+        }
+        return firstActive()
+    }
+
+    private fun nextPlayer(from: Int): Int =
+        if (!tournament) (from + 1) % playerCount else nextActiveAfter(from)
+
+    private fun isOut(color: LudoColor): Boolean =
+        tournament && !active[TOURNAMENT_COLORS.indexOf(color)]
+
+    /** Banner text for a round: "Round 1 - 4 Players", "Round 2 - 3 Players", "Round 3 - Final". */
+    fun roundTitle(r: Int = round): String = when (r) {
+        1 -> "Round 1 - 4 Players"
+        2 -> "Round 2 - 3 Players"
+        else -> "Round 3 - Final"
+    }
+
+    private fun resetTournamentState() {
+        for (i in 0 until 4) active[i] = true
+        round = 1
+        eliminatedOrder.clear()
+        spectator = false
+        overlay = TOverlay.NONE
+        resultEnder = -1
+        resultOut = -1
+        resultPlayers = emptyList()
+        resultSeeds = listOf(0, 0, 0, 0)
+        resultResigned = false
+        leaveTo = -1
+        tieIds = emptyList()
+        for (i in 0 until 4) tieRolls[i] = 0
+        tieRolling = -1
+        stopFast()
+    }
+
+    /** Spectator only: make the computers play fast (no sound) until the tournament is decided. */
+    fun startFast() {
+        if (!tournament || !spectator || fast) return
+        fast = true
+        Sounds.quiet = true
+    }
+
+    fun stopFast() {
+        fast = false
+        Sounds.quiet = false
+    }
+
+    /** The tournament is decided: [to] gets the only point and the winner page shows. */
+    private fun finishTournament(to: Int) {
+        scores[to] = scores[to] + 1
+        winner = to
+        overlay = TOverlay.NONE
+        pick = null
+        pendingMover = null
+        selectedDie = -1
+        stopFast()
+        phase = Phase.GameOver
+    }
+
+    /** [ender] has just got all 4 seeds out. Works out who is knocked out (or who wins the final). */
+    private fun tournamentRoundEnded(ender: Int) {
+        pick = null
+        pendingMover = null
+        selectedDie = -1
+        val inRound = (0 until 4).filter { active[it] }
+        if (inRound.size <= 2) {
+            finishTournament(ender)   // the final: first to get all 4 seeds out wins
+            return
+        }
+        resultEnder = ender
+        resultPlayers = inRound
+        resultSeeds = (0 until 4).map { if (active[it]) seedsOut(it) else -1 }
+        resultResigned = false
+        // 1. Fewest seeds out. 2. If tied: least total distance travelled. 3. If still tied: dice roll-off.
+        val fewest = inRound.minOf { seedsOut(it) }
+        var cand = inRound.filter { seedsOut(it) == fewest }
+        if (cand.size > 1) {
+            val least = cand.minOf { distance(it) }
+            cand = cand.filter { distance(it) == least }
+        }
+        phase = Phase.RoundBreak
+        if (cand.size == 1) {
+            finishElimination(cand[0])
+        } else {
+            tieIds = cand
+            for (i in 0 until 4) tieRolls[i] = 0
+            tieRolling = -1
+            overlay = TOverlay.TIEBREAK
+        }
+    }
+
+    /** [out] is knocked out by the round result: show the Round Result screen. */
+    private fun finishElimination(out: Int) {
+        resultOut = out
+        active[out] = false
+        eliminatedOrder.add(out)
+        if (out == 0) leaveTo = resultEnder   // if the human leaves, the round winner gets the point
+        tieIds = emptyList()
+        for (i in 0 until 4) tieRolls[i] = 0
+        overlay = TOverlay.RESULT
+        phase = Phase.RoundBreak
+    }
+
+    /** Round Result screen: Next Round (or Continue when the human is out and still has to choose). */
+    fun resultNext() {
+        if (overlay != TOverlay.RESULT) return
+        if (!active[0] && !spectator) {
+            overlay = TOverlay.OUT
+            return
+        }
+        startNextRound()
+    }
+
+    /** Every remaining player starts again with all seeds in the house. The turn goes to the next remaining player after the one who ended the round. */
+    private fun startNextRound() {
+        val after = resultEnder
+        overlay = TOverlay.NONE
+        resetRound()
+        round = (5 - activeCount()).coerceIn(1, 3)
+        activePlayer = if (after in 0..3) nextActiveAfter(after) else firstActive()
+        bannerPending = true
+    }
+
+    /** You're Out > Watch: the human stays as a spectator and the computers play on. */
+    fun outWatch() {
+        if (overlay != TOverlay.OUT) return
+        spectator = true
+        startNextRound()
+    }
+
+    /** You're Out > Leave: the tournament ends now and the point goes to [leaveTo]. */
+    fun outLeave() {
+        if (overlay != TOverlay.OUT) return
+        val to = if (leaveTo in 0..3) leaveTo else resignBeneficiary(0)
+        finishTournament(to)
+    }
+
+    /** Menu > Resign in Tournament: the human is knocked out at once and the unfinished round is dropped. */
+    private fun tournamentResign(player: Int) {
+        if (!active[player]) return
+        val to = resignBeneficiary(player)
+        pick = null
+        pendingMover = null
+        selectedDie = -1
+        if (activeCount() <= 2) {
+            finishTournament(to)   // the final: nobody is left to watch, the other player wins
+            return
+        }
+        active[player] = false
+        eliminatedOrder.add(player)
+        resultEnder = -1
+        resultOut = player
+        resultResigned = true
+        leaveTo = to
+        overlay = TOverlay.OUT
+        phase = Phase.RoundBreak
+    }
+
+    // ---- Dice roll-off (Tie-Break screen) ----
+
+    /** The human taps their own dice on the Tie-Break screen. */
+    suspend fun tieHumanRoll() {
+        if (overlay != TOverlay.TIEBREAK || tieRolling >= 0) return
+        if (0 !in tieIds || tieRolls[0] != 0) return
+        rollTieDie(0)
+    }
+
+    private suspend fun rollTieDie(p: Int) {
+        tieRolling = p
+        try {
+            sounds.roll()
+            repeat(8) {
+                tieFlicker = Random.nextInt(1, 7)
+                delay((60 * fastMul).toLong())
+            }
+            val v = Random.nextInt(1, 7)
+            tieFlicker = v
+            sounds.dieLand()
+            if (overlay == TOverlay.TIEBREAK && p in tieIds) tieRolls[p] = v
+        } finally {
+            tieRolling = -1
+        }
+    }
+
+    /**
+     * Runs the roll-off while the Tie-Break screen is open: the human rolls by tapping, the
+     * computers roll by themselves. The lowest roll is knocked out; a tie for lowest rolls again.
+     */
+    suspend fun runTieBreak() {
+        while (overlay == TOverlay.TIEBREAK) {
+            val pending = tieIds.filter { tieRolls[it] == 0 }
+            if (pending.isEmpty()) {
+                delay((1500 * fastMul).toLong())   // everybody can see the numbers
+                if (overlay != TOverlay.TIEBREAK) return
+                resolveTie()
+            } else if (0 in pending || tieRolling >= 0) {
+                delay(100)                         // waiting for the human, or a roll is in progress
+            } else {
+                delay((800 * fastMul).toLong())
+                if (overlay != TOverlay.TIEBREAK) return
+                val next = tieIds.firstOrNull { tieRolls[it] == 0 && it != 0 }
+                if (next != null && tieRolling < 0) rollTieDie(next)
+            }
+        }
+    }
+
+    private fun resolveTie() {
+        val ids = tieIds
+        if (ids.isEmpty() || ids.any { tieRolls[it] == 0 }) return
+        val low = ids.minOf { tieRolls[it] }
+        val lows = ids.filter { tieRolls[it] == low }
+        if (lows.size == 1) {
+            finishElimination(lows[0])
+        } else {
+            // Only the players tied for the lowest roll again.
+            tieIds = lows
+            for (i in 0 until 4) tieRolls[i] = 0
+        }
+    }
+
     suspend fun roll() {
         if (phase != Phase.AwaitRoll) return
         phase = Phase.Rolling
@@ -570,7 +942,7 @@ class LudoGame(val tournament: Boolean = false) {
             face1 = Random.nextInt(1, 7)
             face2 = Random.nextInt(1, 7)
             if (i == 0) sounds.roll()   // one recorded roll sound for the whole roll
-            delay(60)
+            delay((60 * fastMul).toLong())
         }
         val a = Random.nextInt(1, 7)
         val b = Random.nextInt(1, 7)
@@ -598,14 +970,14 @@ class LudoGame(val tournament: Boolean = false) {
 
     private suspend fun endTurn() {
         phase = Phase.Pausing
-        delay(if (movedThisRoll) 500L else 1200L)
+        delay(((if (movedThisRoll) 500L else 1200L) * fastMul).toLong())
         val extraRoll = die1 == 6 && die2 == 6   // only a double six gives another roll
         die1 = 0
         die2 = 0
         used1 = false
         used2 = false
         selectedDie = -1
-        if (!extraRoll) activePlayer = (activePlayer + 1) % playerCount
+        if (!extraRoll) activePlayer = nextPlayer(activePlayer)
         phase = Phase.AwaitRoll
     }
 
@@ -708,7 +1080,7 @@ class LudoGame(val tournament: Boolean = false) {
         if (ownPieces().all { it.won }) {
             phase = Phase.Pausing
             sounds.win()
-            delay(700)
+            delay((700 * fastMul).toLong())
             completeRound()
             return
         }
@@ -747,11 +1119,11 @@ class LudoGame(val tournament: Boolean = false) {
         retCol = vc
         retT = 0f
         applyCapture(mover, victim)
-        sounds.land()
+        sounds.land()   // also a short buzz (see Sounds.land)
         val start = withFrameNanos { it }
         while (true) {
             val now = withFrameNanos { it }
-            val t = ((now - start) / 1_000_000f) / 450f
+            val t = ((now - start) / 1_000_000f) / (450f * fastMul)
             if (t >= 1f) break
             retT = t
         }
@@ -762,7 +1134,10 @@ class LudoGame(val tournament: Boolean = false) {
         movingPiece = piece
         moveProgress = from.toFloat()
         val steps = to - from
-        val duration = if (from == Route.IN_HOUSE) 400f + to * 170f else steps * (if (steps > 6) 150f else 190f)
+        val duration = maxOf(
+            8f,
+            (if (from == Route.IN_HOUSE) 400f + to * 170f else steps * (if (steps > 6) 150f else 190f)) * fastMul
+        )
         if (from == Route.IN_HOUSE) sounds.out()
         var lastCell = from
         val startNanos = withFrameNanos { it }
@@ -790,7 +1165,9 @@ class LudoGame(val tournament: Boolean = false) {
                 if (row in 6f..9f && col in 6f..9f) roll()
             }
             Phase.GameOver -> {
-                if (row in 6f..9f && col in 6f..9f) resetRound()
+                if (row in 6f..9f && col in 6f..9f) {
+                    if (tournament) nextGame() else resetRound()
+                }
             }
             Phase.Choose -> {
                 // Any tap while a popup is open first closes it (its own buttons handle their own taps).
@@ -845,6 +1222,7 @@ class LudoGame(val tournament: Boolean = false) {
 
         for (p in pieces) {
             if (p === moving || p === returning) continue
+            if (isOut(p.color)) continue   // a knocked-out player's seeds are not drawn
             val pr = p.progress
             when {
                 pr < 0 -> {

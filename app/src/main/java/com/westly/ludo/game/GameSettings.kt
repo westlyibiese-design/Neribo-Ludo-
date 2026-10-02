@@ -3,6 +3,7 @@ package com.westly.ludo.game
 import android.content.SharedPreferences
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
 /**
@@ -17,6 +18,16 @@ class GameSettings(private val prefs: SharedPreferences) {
         private set
     var level by mutableIntStateOf(prefs.getInt("comp_level", 0).coerceIn(0, 1))
         private set
+    var soundOn by mutableStateOf(prefs.getBoolean("sound_on", true))
+        private set
+    var vibrationOn by mutableStateOf(prefs.getBoolean("vibration_on", true))
+        private set
+
+    init {
+        // Sounds reads these two flags directly, so they must be set as soon as the settings load.
+        Sounds.soundOn = soundOn
+        Sounds.vibrationOn = vibrationOn
+    }
 
     /** Multiplier for the computer's waiting times: bigger = slower. */
     val speedFactor: Float
@@ -34,6 +45,18 @@ class GameSettings(private val prefs: SharedPreferences) {
     fun chooseSpeed(value: Int) {
         speed = value.coerceIn(0, 2)
         prefs.edit().putInt("comp_speed", speed).apply()
+    }
+
+    fun chooseSound(on: Boolean) {
+        soundOn = on
+        Sounds.soundOn = on
+        prefs.edit().putBoolean("sound_on", on).apply()
+    }
+
+    fun chooseVibration(on: Boolean) {
+        vibrationOn = on
+        Sounds.vibrationOn = on
+        prefs.edit().putBoolean("vibration_on", on).apply()
     }
 
     fun chooseLevel(value: Int) {

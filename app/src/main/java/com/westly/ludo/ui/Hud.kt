@@ -21,6 +21,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -125,6 +126,55 @@ private fun DrawScope.exitIcon(c: Offset, r: Float) {
     val red = Color(0xFFD62828)
     drawLine(red, Offset(c.x - d, c.y - d), Offset(c.x + d, c.y + d), strokeWidth = s * 0.16f, cap = StrokeCap.Round)
     drawLine(red, Offset(c.x - d, c.y + d), Offset(c.x + d, c.y - d), strokeWidth = s * 0.16f, cap = StrokeCap.Round)
+}
+
+/** Two right-pointing triangles: fast-forward. */
+private fun DrawScope.skipIcon(c: Offset, r: Float) {
+    for (dx in listOf(-0.3f, 0.22f)) {
+        val x = c.x + dx * r
+        val path = Path().apply {
+            moveTo(x - r * 0.28f, c.y - r * 0.42f)
+            lineTo(x + r * 0.28f, c.y)
+            lineTo(x - r * 0.28f, c.y + r * 0.42f)
+            close()
+        }
+        drawPath(path, Color.White)
+    }
+}
+
+/** Spectator fast-forward button (the tap itself is added by the caller). [active] = already fast. */
+@Composable
+fun SkipButton(diameter: Dp, active: Boolean, modifier: Modifier = Modifier) {
+    Column(modifier.width(diameter), horizontalAlignment = Alignment.CenterHorizontally) {
+        Canvas(Modifier.size(diameter)) {
+            val r = this.size.minDimension / 2f * 0.94f
+            val c = Offset(this.size.width / 2f, this.size.height / 2f)
+            drawGlossyDisc(c, r, if (active) Palette.Orange else Palette.Green)
+            skipIcon(c, r)
+        }
+        BasicText(
+            if (active) "Fast" else "Skip",
+            style = hudTextStyle((diameter * 0.27f).asSp()),
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
+/** The round banner ("Round 1 - 4 Players"). Drawn over the board; it takes no taps. */
+@Composable
+fun RoundBanner(text: String, unit: Dp, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(50)
+    Box(
+        modifier
+            .width(unit * 74f)
+            .height(unit * 13f)
+            .background(Brush.verticalGradient(listOf(Palette.PillLight, Palette.PillDark)), shape)
+            .border(2.dp, Palette.PillEdge, shape),
+        contentAlignment = Alignment.Center
+    ) {
+        BasicText(text, style = hudTextStyle((unit * 5.4f).asSp()), maxLines = 1, softWrap = false)
+    }
 }
 
 @Composable

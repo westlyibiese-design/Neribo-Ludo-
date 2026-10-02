@@ -5,6 +5,10 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.media.SoundPool
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import com.westly.ludo.R
 import kotlin.math.PI
 import kotlin.math.exp
@@ -23,6 +27,36 @@ class Sounds {
     companion object {
         /** Set once by MainActivity so the recorded sounds can be loaded. */
         @Volatile var appContext: Context? = null
+
+        /** Sound & Vibration settings (set from GameSettings). When off, nothing plays / buzzes. */
+        @Volatile var soundOn: Boolean = true
+        @Volatile var vibrationOn: Boolean = true
+
+        /** Set during spectator fast-forward: no sound and no buzz at all. */
+        @Volatile var quiet: Boolean = false
+    }
+
+    private fun muted(): Boolean = !soundOn || quiet
+
+    /** A short buzz (about 30-60 ms). Safe on every Android version; skipped if there is no vibrator. */
+    fun buzz(ms: Long = 45L) {
+        if (!vibrationOn || quiet) return
+        val ctx = appContext ?: return
+        try {
+            val vib: Vibrator? = if (Build.VERSION.SDK_INT >= 31) {
+                (ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+            } else {
+                ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+            if (vib == null || !vib.hasVibrator()) return
+            if (Build.VERSION.SDK_INT >= 26) {
+                vib.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                vib.vibrate(ms)
+            }
+        } catch (e: Exception) {
+            // ignore: vibration is optional
+        }
     }
 
     private val ready = HashSet<Int>()
@@ -80,21 +114,39 @@ class Sounds {
 
     /** Dice rolling: recorded sound, played once at the start of a roll. */
     fun roll() {
+        buzz()
+        if (muted()) return
         if (!sample(rollId)) play(rattle)
     }
 
     /** Dice landing: recorded sound. */
     fun dieLand() {
+        if (muted()) return
         if (!sample(landId)) play(thud)
     }
 
     /** Built-in thud (used when a seed is captured). */
-    fun land() = play(thud)
-    fun tick() = play(tick)
-    fun out() = play(pop)
-    fun finish() = play(chime)
+    fun land() {
+        buzz()
+        if (muted()) return
+        play(thud)
+    }
+    fun tick() {
+        if (muted()) return
+        play(tick)
+    }
+    fun out() {
+        if (muted()) return
+        play(pop)
+    }
+    fun finish() {
+        if (muted()) return
+        play(chime)
+    }
     /** Round win: recorded sound. */
     fun win() {
+        buzz(60L)
+        if (muted()) return
         if (!sample(winId)) play(fanfare)
     }
 
