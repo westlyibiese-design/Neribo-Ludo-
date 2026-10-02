@@ -34,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -56,6 +57,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import com.westly.ludo.R
+import com.westly.ludo.game.GameSettings
 import com.westly.ludo.game.PlayerNames
 import kotlin.math.PI
 import kotlin.math.cos
@@ -324,7 +326,7 @@ private fun SettingsRow(
 }
 
 @Composable
-fun SettingsScreen(names: PlayerNames, onClose: () -> Unit) {
+fun SettingsScreen(names: PlayerNames, onConfiguration: () -> Unit, onClose: () -> Unit) {
     var namesOpen by remember { mutableStateOf(false) }
     // Soft entrance: fade and grow a little.
     val enter = remember { Animatable(0f) }
@@ -364,7 +366,7 @@ fun SettingsScreen(names: PlayerNames, onClose: () -> Unit) {
                     Spacer(Modifier.height(u * 4f))
                     SettingsRow("Rules", Palette.Green, u) { c, r -> rulesIcon(c, r) }
                     Spacer(Modifier.height(u * 4f))
-                    SettingsRow("Configuration", Palette.Yellow, u) { c, r -> configIcon(c, r) }
+                    SettingsRow("Configuration", Palette.Yellow, u, onClick = onConfiguration) { c, r -> configIcon(c, r) }
                     Spacer(Modifier.height(u * 4f))
                     SettingsRow("Change Names", Palette.Red, u, onClick = { namesOpen = true }) { c, r -> nameIcon(c, r) }
                 }
@@ -372,6 +374,129 @@ fun SettingsScreen(names: PlayerNames, onClose: () -> Unit) {
         }
     }
     if (namesOpen) ChangeNamesDialog(names, onClose = { namesOpen = false })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration: board type, computer speed, computer level
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun OptionChip(text: String, selected: Boolean, u: Dp, width: Dp, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(50)
+    val fill = if (selected) {
+        Brush.verticalGradient(listOf(Palette.Green.light, Palette.Green.base, Palette.Green.dark))
+    } else {
+        Brush.verticalGradient(listOf(Palette.PillLight, Palette.PillDark))
+    }
+    Box(
+        Modifier
+            .width(width)
+            .height(u * 8f)
+            .background(fill, shape)
+            .border(if (selected) 2.dp else 1.dp, if (selected) Color.White else Palette.PillEdge, shape)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        BasicText(text, style = menuText((u * 3.8f).sp()), maxLines = 1, softWrap = false)
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String, u: Dp) {
+    BasicText(
+        text,
+        style = menuText((u * 4.2f).sp(), Color.White.copy(alpha = 0.9f)),
+        maxLines = 1,
+        softWrap = false
+    )
+    Spacer(Modifier.height(u * 1.5f))
+}
+
+/** Small 2x2 preview of the four houses for the chosen board type. */
+@Composable
+private fun ThemePreview(type: Int, u: Dp) {
+    val ids = BoardThemes.images(type)
+    val classic = listOf(Palette.Green, Palette.Yellow, Palette.Red, Palette.Blue)
+    val shape = RoundedCornerShape(u * 1.5f)
+    Column(verticalArrangement = Arrangement.spacedBy(u * 1f)) {
+        for (r in 0..1) {
+            Row(horizontalArrangement = Arrangement.spacedBy(u * 1f)) {
+                for (c in 0..1) {
+                    val i = r * 2 + c
+                    val box = Modifier.size(u * 14f).clip(shape).border(1.dp, Palette.PillEdge, shape)
+                    if (ids.isEmpty()) {
+                        Box(box.background(Brush.verticalGradient(listOf(classic[i].light, classic[i].base))))
+                    } else {
+                        Image(
+                            painter = painterResource(ids[i]),
+                            contentDescription = null,
+                            modifier = box,
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ConfigurationScreen(settings: GameSettings, onClose: () -> Unit) {
+    MenuBackground(R.drawable.bg_settings) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val u = minOf(maxWidth / 100f, maxHeight / 150f)
+            Column(
+                Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Box(Modifier.fillMaxWidth().padding(horizontal = u * 3f)) {
+                    GlossButton(
+                        "Configuration", Palette.Orange, u * 56f, u * 14f,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                    ExitButton(
+                        u * 11.8f,
+                        Modifier.align(Alignment.CenterEnd).clickable { onClose() }
+                    )
+                }
+                Spacer(Modifier.height(u * 4f))
+
+                SectionLabel("Board Type", u)
+                Row(horizontalArrangement = Arrangement.spacedBy(u * 2f)) {
+                    for (i in 0..2) {
+                        OptionChip(BoardThemes.names[i], settings.boardType == i, u, u * 27f) { settings.chooseBoard(i) }
+                    }
+                }
+                Spacer(Modifier.height(u * 2f))
+                Row(horizontalArrangement = Arrangement.spacedBy(u * 2f)) {
+                    for (i in 3..4) {
+                        OptionChip(BoardThemes.names[i], settings.boardType == i, u, u * 27f) { settings.chooseBoard(i) }
+                    }
+                }
+                Spacer(Modifier.height(u * 2.5f))
+                ThemePreview(settings.boardType, u)
+                Spacer(Modifier.height(u * 3f))
+
+                SectionLabel("Computer Speed", u)
+                Row(horizontalArrangement = Arrangement.spacedBy(u * 2f)) {
+                    val labels = listOf("Slow", "Normal", "Fast")
+                    for (i in 0..2) {
+                        OptionChip(labels[i], settings.speed == i, u, u * 27f) { settings.chooseSpeed(i) }
+                    }
+                }
+                Spacer(Modifier.height(u * 3f))
+
+                SectionLabel("Computer Level", u)
+                Row(horizontalArrangement = Arrangement.spacedBy(u * 2f)) {
+                    val labels = listOf("Easy", "Normal")
+                    for (i in 0..1) {
+                        OptionChip(labels[i], settings.level == i, u, u * 27f) { settings.chooseLevel(i) }
+                    }
+                }
+            }
+        }
     }
 }
 

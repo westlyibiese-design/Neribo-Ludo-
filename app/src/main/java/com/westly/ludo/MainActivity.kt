@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -43,14 +44,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.westly.ludo.game.LudoGame
+import com.westly.ludo.game.GameSettings
 import com.westly.ludo.game.Phase
 import com.westly.ludo.game.PlayerNames
 import com.westly.ludo.game.Sounds
+import com.westly.ludo.ui.BoardThemes
 import com.westly.ludo.ui.ChangeNamesDialog
+import com.westly.ludo.ui.ConfigurationScreen
 import com.westly.ludo.ui.CounterOrb
 import com.westly.ludo.ui.ExitButton
 import com.westly.ludo.ui.GameModeScreen
@@ -84,6 +90,9 @@ class MainActivity : ComponentActivity() {
     // Player names, saved on this phone until the user changes them again.
     private val names by lazy { PlayerNames(prefs()) }
 
+    // Board type, computer speed and computer level, saved on this phone.
+    private val settings by lazy { GameSettings(prefs()) }
+
     private fun saveGame() {
         prefs().edit()
             .putString("save", game.toSaveString())
@@ -97,7 +106,7 @@ class MainActivity : ComponentActivity() {
         Sounds.appContext = applicationContext
         prefs().getString("save", null)?.let { game.restore(it) }
         prefs().getString("tournament_save", null)?.let { tournament.restore(it) }
-        setContent { LudoApp(game, tournament, names) }
+        setContent { LudoApp(game, tournament, names, settings) }
     }
 
     override fun onPause() {
@@ -113,7 +122,7 @@ class MainActivity : ComponentActivity() {
 
 /** Intro -> home -> settings / game modes -> the chosen game. */
 @Composable
-fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames) {
+fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames, settings: GameSettings) {
     // One scope for the whole app screen, so a move in progress is not cut off when leaving a game.
     val scope = rememberCoroutineScope()
     var screen by rememberSaveable { mutableStateOf("intro") }
@@ -121,6 +130,7 @@ fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames) {
     BackHandler(enabled = screen != "intro" && screen != "home") {
         screen = when (screen) {
             "game", "tournament" -> "modes"
+            "config" -> "settings"
             else -> "home"
         }
     }
@@ -130,14 +140,15 @@ fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames) {
             when (s) {
                 "intro" -> NeriboIntro { screen = "home" }
                 "home" -> HomeScreen(onSettings = { screen = "settings" }, onGame = { screen = "modes" })
-                "settings" -> SettingsScreen(names, onClose = { screen = "home" })
+                "settings" -> SettingsScreen(names, onConfiguration = { screen = "config" }, onClose = { screen = "home" })
+                "config" -> ConfigurationScreen(settings, onClose = { screen = "settings" })
                 "modes" -> GameModeScreen(
                     onBack = { screen = "home" },
                     onYouAndComputer = { screen = "game" },
                     onTournament = { screen = "tournament" }
                 )
-                "game" -> LudoScreen(game, scope, names, onModes = { screen = "modes" }, onHome = { screen = "home" })
-                "tournament" -> LudoScreen(tournament, scope, names, onModes = { screen = "modes" }, onHome = { screen = "home" })
+                "game" -> LudoScreen(game, scope, names, settings, onModes = { screen = "modes" }, onHome = { screen = "home" })
+                "tournament" -> LudoScreen(tournament, scope, names, settings, onModes = { screen = "modes" }, onHome = { screen = "home" })
             }
         }
         // © line at the same spot on every page (the intro already shows its own © line).
@@ -159,8 +170,22 @@ private fun turnText(game: LudoGame, names: PlayerNames): String = when {
  * scales with the device.
  */
 @Composable
-fun LudoScreen(game: LudoGame, scope: CoroutineScope, names: PlayerNames, onModes: () -> Unit, onHome: () -> Unit) {
+fun LudoScreen(
+    game: LudoGame,
+    scope: CoroutineScope,
+    names: PlayerNames,
+    settings: GameSettings,
+    onModes: () -> Unit,
+    onHome: () -> Unit
+) {
     val tournament = game.tournament
+
+    // Configuration: computer speed and level, and the board type pictures for the four houses.
+    SideEffect {
+        game.computerSpeed = settings.speedFactor
+        game.computerLevel = settings.level
+    }
+    val yardImages: List<ImageBitmap?> = BoardThemes.images(settings.boardType).map { ImageBitmap.imageResource(it) }
 
     // Computer players only play while this screen is showing; they stop at a clean moment.
     DisposableEffect(game) {
@@ -263,7 +288,8 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, names: PlayerNames, onMode
                     onPick = { tag -> if (!game.isComputerTurn) scope.launch { game.onPiecePicked(tag) } },
                     onBoardTap = { row, col -> if (!game.isComputerTurn) scope.launch { game.onBoardTap(row, col) } },
                     yardLabels = if (tournament) listOf(names[1], names[2], names[0], names[3])
-                    else listOf(names[1], names[0], names[0], names[1])
+                    else listOf(names[1], names[0], names[0], names[1]),
+                    yardImages = yardImages
                 )
 
                 // Bottom: dice indicators (blue = first die, red = total, green = second die)

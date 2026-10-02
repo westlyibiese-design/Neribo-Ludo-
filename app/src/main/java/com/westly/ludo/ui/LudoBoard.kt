@@ -36,6 +36,13 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import kotlin.math.roundToInt
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
@@ -81,7 +88,9 @@ fun LudoBoard(
     onPick: (Any?) -> Unit = {},
     onBoardTap: ((row: Float, col: Float) -> Unit)? = null,
     /** Yard names in the order green, yellow, red, blue. */
-    yardLabels: List<String> = listOf("Player 2", "Player 1", "Player 1", "Player 2")
+    yardLabels: List<String> = listOf("Player 2", "Player 1", "Player 1", "Player 2"),
+    /** Yard pictures in the order green, yellow, red, blue. Empty = the normal colored yards. */
+    yardImages: List<ImageBitmap?> = emptyList()
 ) {
     val measurer = rememberTextMeasurer()
     val tapHandler = rememberUpdatedState(onBoardTap)
@@ -102,7 +111,7 @@ fun LudoBoard(
         ) {
             // The static board sits on its own layer so it is not redrawn while pieces move.
             Canvas(Modifier.fillMaxSize().graphicsLayer { }) {
-                drawLudoBoard(leftDie, rightDie, measurer, pieces == null, yardLabels)
+                drawLudoBoard(leftDie, rightDie, measurer, pieces == null, yardLabels, yardImages)
             }
             if (pieces != null) {
                 Canvas(Modifier.fillMaxSize()) {
@@ -154,7 +163,8 @@ private fun DrawScope.drawLudoBoard(
     rightDie: Int,
     measurer: TextMeasurer,
     seeds: Boolean,
-    labels: List<String>
+    labels: List<String>,
+    images: List<ImageBitmap?>
 ) {
     val s = size.minDimension
     val pad = s * PAD_FRAC
@@ -170,7 +180,7 @@ private fun DrawScope.drawLudoBoard(
     drawRoundRect(Palette.Cream, Offset(m.ox, m.oy), Size(boardSide, boardSide), boardCorner)
 
     drawPathCells(m)
-    drawYards(m, measurer, seeds, labels)
+    drawYards(m, measurer, seeds, labels, images)
     drawCenter(m)
     drawPathArrows(m)
 
@@ -256,11 +266,17 @@ private fun DrawScope.drawPathCells(m: Metrics) {
     }
 }
 
-private fun DrawScope.drawYards(m: Metrics, measurer: TextMeasurer, seeds: Boolean, labels: List<String>) {
-    drawYard(m, 0, 0, Palette.Green, labels[0], measurer, seeds)
-    drawYard(m, 0, 9, Palette.Yellow, labels[1], measurer, seeds)
-    drawYard(m, 9, 0, Palette.Red, labels[2], measurer, seeds)
-    drawYard(m, 9, 9, Palette.Blue, labels[3], measurer, seeds)
+private fun DrawScope.drawYards(
+    m: Metrics,
+    measurer: TextMeasurer,
+    seeds: Boolean,
+    labels: List<String>,
+    images: List<ImageBitmap?>
+) {
+    drawYard(m, 0, 0, Palette.Green, labels[0], measurer, seeds, images.getOrNull(0))
+    drawYard(m, 0, 9, Palette.Yellow, labels[1], measurer, seeds, images.getOrNull(1))
+    drawYard(m, 9, 0, Palette.Red, labels[2], measurer, seeds, images.getOrNull(2))
+    drawYard(m, 9, 9, Palette.Blue, labels[3], measurer, seeds, images.getOrNull(3))
 }
 
 private fun DrawScope.drawYard(
@@ -270,7 +286,8 @@ private fun DrawScope.drawYard(
     sw: Swatch,
     label: String,
     measurer: TextMeasurer,
-    seeds: Boolean
+    seeds: Boolean,
+    image: ImageBitmap?
 ) {
     val c = m.cell
     val tl = Offset(m.x(col.toFloat()), m.y(row.toFloat()))
@@ -287,6 +304,21 @@ private fun DrawScope.drawYard(
         yardSize,
         corner
     )
+    // Board theme: a picture fills the whole yard (cut to the rounded corners).
+    if (image != null) {
+        val clip = Path().apply {
+            addRoundRect(RoundRect(tl.x, tl.y, tl.x + yardSize.width, tl.y + yardSize.height, corner))
+        }
+        clipPath(clip) {
+            drawImage(
+                image,
+                srcSize = IntSize(image.width, image.height),
+                dstOffset = IntOffset(tl.x.roundToInt(), tl.y.roundToInt()),
+                dstSize = IntSize(yardSize.width.roundToInt(), yardSize.height.roundToInt()),
+                filterQuality = FilterQuality.High
+            )
+        }
+    }
     val edgeW = c * 0.05f
     drawRoundRect(
         sw.dark,
@@ -300,17 +332,30 @@ private fun DrawScope.drawYard(
     val plateTl = tl + Offset(c, c)
     val plateSize = Size(c * 4f, c * 4f)
     val plateCorner = CornerRadius(c * 0.4f)
-    drawRoundRect(
-        Brush.verticalGradient(
-            listOf(sw.dark.shade(0.8f), sw.dark),
-            startY = plateTl.y,
-            endY = plateTl.y + plateSize.height
-        ),
-        plateTl,
-        plateSize,
-        plateCorner
-    )
-    drawRoundRect(Color.Black.copy(alpha = 0.22f), plateTl, plateSize, plateCorner, style = Stroke(c * 0.05f))
+    if (image == null) {
+        drawRoundRect(
+            Brush.verticalGradient(
+                listOf(sw.dark.shade(0.8f), sw.dark),
+                startY = plateTl.y,
+                endY = plateTl.y + plateSize.height
+            ),
+            plateTl,
+            plateSize,
+            plateCorner
+        )
+        drawRoundRect(Color.Black.copy(alpha = 0.22f), plateTl, plateSize, plateCorner, style = Stroke(c * 0.05f))
+    } else {
+        // Over a picture: a light tint plus four soft rings where the seeds rest.
+        drawRoundRect(Color.Black.copy(alpha = 0.16f), plateTl, plateSize, plateCorner)
+        drawRoundRect(Color.White.copy(alpha = 0.25f), plateTl, plateSize, plateCorner, style = Stroke(c * 0.04f))
+        for (dx in listOf(2f, 4f)) {
+            for (dy in listOf(2f, 4f)) {
+                val spot = tl + Offset(c * dx, c * dy)
+                drawCircle(Color.Black.copy(alpha = 0.22f), c * 0.56f, spot)
+                drawCircle(Color.White.copy(alpha = 0.5f), c * 0.56f, spot, style = Stroke(c * 0.05f))
+            }
+        }
+    }
 
     // Four seeds resting in the yard
     if (seeds) {
@@ -333,6 +378,17 @@ private fun DrawScope.drawYard(
         maxLines = 1,
         softWrap = false
     )
+    if (image != null) {
+        // Name tag so the name stays readable over the picture.
+        val tagW = layout.size.width + c * 0.7f
+        val tagH = layout.size.height + c * 0.2f
+        drawRoundRect(
+            Color.Black.copy(alpha = 0.5f),
+            Offset(tl.x + c * 3f - tagW / 2f, tl.y + c * 0.5f - tagH / 2f),
+            Size(tagW, tagH),
+            CornerRadius(tagH / 2f)
+        )
+    }
     drawText(
         textLayoutResult = layout,
         topLeft = Offset(

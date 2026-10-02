@@ -217,6 +217,10 @@ class LudoGame(val tournament: Boolean = false) {
     var plannedVictim by mutableStateOf<Piece?>(null)
         private set
 
+    /** Computer pace (1 = normal, bigger = slower) and level (0 = easy, 1 = normal). Set from Configuration. */
+    var computerSpeed: Float = 1f
+    var computerLevel: Int = 0
+
     private var computerBusy = false
     private val stopComputer: Boolean get() = paused || halting
     private val computers: List<ComputerPlayer> =
@@ -293,17 +297,17 @@ class LudoGame(val tournament: Boolean = false) {
                 val ai = computers.first { it.playerIndex == activePlayer }
                 when (phase) {
                     Phase.AwaitRoll -> {
-                        delay(1000)                       // hand reaches the dice
+                        delay((1000 * computerSpeed).toLong())                       // hand reaches the dice
                         if (stopComputer) return
                         roll()
                     }
                     Phase.Choose -> {
                         val move = ai.chooseMove(this) ?: return
                         plannedMove = move
-                        delay(800)                        // hand points at the movement circle
+                        delay((800 * computerSpeed).toLong())                        // hand points at the movement circle
                         if (stopComputer) { plannedMove = null; return }
                         computerOption = move.option      // display only: hand moves on to the seed
-                        delay(700)                        // hand moves to the seed
+                        delay((700 * computerSpeed).toLong())                        // hand moves to the seed
                         if (stopComputer) { plannedMove = null; return }
                         // The computer's own internal move: no human dice control is used.
                         executeMove(move.piece, move.option)
@@ -313,7 +317,7 @@ class LudoGame(val tournament: Boolean = false) {
                     Phase.CaptureChoose -> {
                         val victim = ai.chooseVictim(this) ?: return
                         plannedVictim = victim
-                        delay(900)
+                        delay((900 * computerSpeed).toLong())
                         if (stopComputer) { plannedVictim = null; return }
                         resolveCapture(victim)            // internal: not the human pick handler
                         plannedVictim = null

@@ -15,6 +15,8 @@ class ComputerPlayer(val playerIndex: Int, val colors: List<LudoColor>) {
         if (game.activePlayer != playerIndex) return null
         val moves = game.legalMoves().filter { it.piece.color in colors }
         if (moves.isEmpty()) return null
+        // Easy level: most of the time it just plays a random legal move.
+        if (game.computerLevel == 0 && Random.nextFloat() < 0.6f) return moves.random()
         return moves.maxByOrNull { score(game, it) }
     }
 
@@ -22,6 +24,7 @@ class ComputerPlayer(val playerIndex: Int, val colors: List<LudoColor>) {
     fun chooseVictim(game: LudoGame): Piece? {
         if (game.activePlayer != playerIndex) return null
         val victims = game.pick?.items?.mapNotNull { it.tag as? Piece } ?: return null
+        if (game.computerLevel == 0) return victims.randomOrNull()
         return victims.maxByOrNull { it.progress }
     }
 
