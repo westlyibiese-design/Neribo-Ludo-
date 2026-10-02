@@ -63,7 +63,8 @@ private fun Pill(text: String, textSize: Dp, modifier: Modifier = Modifier, edge
 @Composable
 fun PlayerBadge(name: String, score: Int, unit: Dp, modifier: Modifier = Modifier, accent: Color? = null) {
     Column(modifier.width(unit * 32f), horizontalAlignment = Alignment.CenterHorizontally) {
-        Pill(name, unit * 4.6f, Modifier.fillMaxWidth().height(unit * 7.3f), accent ?: Palette.PillEdge)
+        val nameScale = if (name.length > 8) 8f / name.length else 1f
+        Pill(name, unit * 4.6f * nameScale, Modifier.fillMaxWidth().height(unit * 7.3f), accent ?: Palette.PillEdge)
         Spacer(Modifier.height(unit * 0.6f))
         Pill("Score: $score", unit * 3.9f, Modifier.width(unit * 27f).height(unit * 5.6f))
     }

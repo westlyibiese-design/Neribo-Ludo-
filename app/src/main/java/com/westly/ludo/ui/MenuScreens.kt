@@ -28,6 +28,8 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +56,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import com.westly.ludo.R
+import com.westly.ludo.game.PlayerNames
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -85,7 +88,7 @@ private fun MenuBackground(image: Int, content: @Composable () -> Unit) {
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop
         )
-        Box(Modifier.fillMaxSize().systemBarsPadding()) { content() }
+        Box(Modifier.fillMaxSize().systemBarsPadding().padding(bottom = FooterSpace)) { content() }
     }
 }
 
@@ -288,7 +291,13 @@ private fun DrawScope.nameIcon(c: Offset, r: Float) {
 }
 
 @Composable
-private fun SettingsRow(label: String, swatch: Swatch, u: Dp, icon: DrawScope.(Offset, Float) -> Unit) {
+private fun SettingsRow(
+    label: String,
+    swatch: Swatch,
+    u: Dp,
+    onClick: (() -> Unit)? = null,
+    icon: DrawScope.(Offset, Float) -> Unit
+) {
     val shape = RoundedCornerShape(50)
     Box(
         Modifier
@@ -296,6 +305,7 @@ private fun SettingsRow(label: String, swatch: Swatch, u: Dp, icon: DrawScope.(O
             .height(u * 16f)
             .background(Brush.verticalGradient(listOf(Palette.PillLight, Palette.PillDark)), shape)
             .border(1.dp, Palette.PillEdge, shape)
+            .clickable(enabled = onClick != null) { onClick?.invoke() }
     ) {
         Canvas(Modifier.align(Alignment.CenterStart).padding(start = u * 2f).size(u * 12f)) {
             val r = size.minDimension / 2f * 0.94f
@@ -314,11 +324,13 @@ private fun SettingsRow(label: String, swatch: Swatch, u: Dp, icon: DrawScope.(O
 }
 
 @Composable
-fun SettingsScreen(onClose: () -> Unit) {
+fun SettingsScreen(names: PlayerNames, onClose: () -> Unit) {
+    var namesOpen by remember { mutableStateOf(false) }
     // Soft entrance: fade and grow a little.
     val enter = remember { Animatable(0f) }
     LaunchedEffect(Unit) { enter.animateTo(1f, tween(320)) }
 
+    Box(Modifier.fillMaxSize()) {
     MenuBackground(R.drawable.bg_settings) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val u = minOf(maxWidth / 100f, maxHeight / 160f)
@@ -354,10 +366,12 @@ fun SettingsScreen(onClose: () -> Unit) {
                     Spacer(Modifier.height(u * 4f))
                     SettingsRow("Configuration", Palette.Yellow, u) { c, r -> configIcon(c, r) }
                     Spacer(Modifier.height(u * 4f))
-                    SettingsRow("Change Names", Palette.Red, u) { c, r -> nameIcon(c, r) }
+                    SettingsRow("Change Names", Palette.Red, u, onClick = { namesOpen = true }) { c, r -> nameIcon(c, r) }
                 }
             }
         }
+    }
+    if (namesOpen) ChangeNamesDialog(names, onClose = { namesOpen = false })
     }
 }
 

@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -47,11 +48,19 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.westly.ludo.game.LudoGame
 import com.westly.ludo.game.Phase
+import com.westly.ludo.game.PlayerNames
+import com.westly.ludo.game.Sounds
+import com.westly.ludo.ui.ChangeNamesDialog
 import com.westly.ludo.ui.CounterOrb
 import com.westly.ludo.ui.ExitButton
 import com.westly.ludo.ui.GameModeScreen
 import com.westly.ludo.ui.HandGuide
+import com.westly.ludo.ui.FooterSpace
 import com.westly.ludo.ui.HomeScreen
+import com.westly.ludo.ui.MenuDialog
+import com.westly.ludo.ui.NeriboFooter
+import com.westly.ludo.ui.ResignDialog
+import com.westly.ludo.ui.WinnerPage
 import com.westly.ludo.ui.LudoBoard
 import com.westly.ludo.ui.NeriboIntro
 import com.westly.ludo.ui.SettingsScreen
@@ -72,6 +81,9 @@ class MainActivity : ComponentActivity() {
 
     private fun prefs() = getSharedPreferences("ludomate", Context.MODE_PRIVATE)
 
+    // Player names, saved on this phone until the user changes them again.
+    private val names by lazy { PlayerNames(prefs()) }
+
     private fun saveGame() {
         prefs().edit()
             .putString("save", game.toSaveString())
@@ -82,9 +94,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        Sounds.appContext = applicationContext
         prefs().getString("save", null)?.let { game.restore(it) }
         prefs().getString("tournament_save", null)?.let { tournament.restore(it) }
-        setContent { LudoApp(game, tournament) }
+        setContent { LudoApp(game, tournament, names) }
     }
 
     override fun onPause() {
@@ -100,7 +113,7 @@ class MainActivity : ComponentActivity() {
 
 /** Intro -> home -> settings / game modes -> the chosen game. */
 @Composable
-fun LudoApp(game: LudoGame, tournament: LudoGame) {
+fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames) {
     // One scope for the whole app screen, so a move in progress is not cut off when leaving a game.
     val scope = rememberCoroutineScope()
     var screen by rememberSaveable { mutableStateOf("intro") }
@@ -112,20 +125,32 @@ fun LudoApp(game: LudoGame, tournament: LudoGame) {
         }
     }
 
-    Crossfade(targetState = screen, animationSpec = tween(400), label = "screen") { s ->
-        when (s) {
-            "intro" -> NeriboIntro { screen = "home" }
-            "home" -> HomeScreen(onSettings = { screen = "settings" }, onGame = { screen = "modes" })
-            "settings" -> SettingsScreen(onClose = { screen = "home" })
-            "modes" -> GameModeScreen(
-                onBack = { screen = "home" },
-                onYouAndComputer = { screen = "game" },
-                onTournament = { screen = "tournament" }
-            )
-            "game" -> LudoScreen(game, scope, onExit = { screen = "modes" })
-            "tournament" -> LudoScreen(tournament, scope, onExit = { screen = "modes" })
+    Box(Modifier.fillMaxSize()) {
+        Crossfade(targetState = screen, animationSpec = tween(400), label = "screen") { s ->
+            when (s) {
+                "intro" -> NeriboIntro { screen = "home" }
+                "home" -> HomeScreen(onSettings = { screen = "settings" }, onGame = { screen = "modes" })
+                "settings" -> SettingsScreen(names, onClose = { screen = "home" })
+                "modes" -> GameModeScreen(
+                    onBack = { screen = "home" },
+                    onYouAndComputer = { screen = "game" },
+                    onTournament = { screen = "tournament" }
+                )
+                "game" -> LudoScreen(game, scope, names, onModes = { screen = "modes" }, onHome = { screen = "home" })
+                "tournament" -> LudoScreen(tournament, scope, names, onModes = { screen = "modes" }, onHome = { screen = "home" })
+            }
+        }
+        // © line at the same spot on every page (the intro already shows its own © line).
+        if (screen != "intro") {
+            NeriboFooter(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 4.dp))
         }
     }
+}
+
+private fun turnText(game: LudoGame, names: PlayerNames): String = when {
+    game.phase == Phase.GameOver -> "${names[game.winner.coerceAtLeast(0)]} Wins!"
+    game.activePlayer == 0 -> "Your Turn"
+    else -> "${names[game.activePlayer]} Turn"
 }
 
 /**
@@ -134,7 +159,7 @@ fun LudoApp(game: LudoGame, tournament: LudoGame) {
  * scales with the device.
  */
 @Composable
-fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
+fun LudoScreen(game: LudoGame, scope: CoroutineScope, names: PlayerNames, onModes: () -> Unit, onHome: () -> Unit) {
     val tournament = game.tournament
 
     // Computer players only play while this screen is showing; they stop at a clean moment.
@@ -158,6 +183,11 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
     }
     val over = game.phase == Phase.GameOver
 
+    // Which pop-up is open: "none", "menu", "resign" or "names". Computers wait while one is open.
+    var dialog by remember { mutableStateOf("none") }
+    LaunchedEffect(dialog) { game.paused = dialog != "none" }
+
+    Box(Modifier.fillMaxSize()) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -165,7 +195,7 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
             .systemBarsPadding(),
         contentAlignment = Alignment.Center
     ) {
-        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(bottom = FooterSpace), contentAlignment = Alignment.Center) {
             // The board takes the full screen width (or up to 70% of the height on short screens).
             // Everything around it is sized in `u` (1% of the screen width) and shrinks only if needed.
             // Tournament shows four score badges, so its bottom area is a little taller.
@@ -180,38 +210,41 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
             ) {
                 // Top: menu button, exit button, then player names + scores
                 Box(Modifier.width(u * 100f).height(u * 27.5f)) {
-                    MenuButton(u * 11.8f, Modifier.align(Alignment.TopStart).padding(start = u * 1f, top = u * 1f))
+                    MenuButton(
+                        u * 11.8f,
+                        Modifier.align(Alignment.TopStart).padding(start = u * 1f, top = u * 1f).clickable { dialog = "menu" }
+                    )
                     ExitButton(
                         u * 11.8f,
-                        Modifier.align(Alignment.TopEnd).padding(end = u * 1f, top = u * 1f).clickable { onExit() }
+                        Modifier.align(Alignment.TopEnd).padding(end = u * 1f, top = u * 1f).clickable { onModes() }
                     )
                     if (tournament) {
                         TurnPill(
-                            if (over) "Player ${game.winner + 1} Wins!" else "Player ${game.activePlayer + 1} Turn",
+                            turnText(game, names),
                             u,
                             Modifier.align(Alignment.TopCenter).padding(top = u * 2f),
                             textScale = 0.75f
                         )
                         PlayerBadge(
-                            "Player 2", game.scores[1], u,
+                            names[1], game.scores[1], u,
                             Modifier.align(Alignment.BottomStart).padding(start = u * 12f)
                                 .alpha(if (game.activePlayer == 1) 1f else 0.5f),
                             Palette.Green.base
                         )
                         PlayerBadge(
-                            "Player 3", game.scores[2], u,
+                            names[2], game.scores[2], u,
                             Modifier.align(Alignment.BottomEnd).padding(end = u * 11f)
                                 .alpha(if (game.activePlayer == 2) 1f else 0.5f),
                             Palette.Yellow.base
                         )
                     } else {
                         PlayerBadge(
-                            "Player 2", game.scores[1], u,
+                            names[1], game.scores[1], u,
                             Modifier.align(Alignment.BottomStart).padding(start = u * 12f)
                                 .alpha(if (game.activePlayer == 1) 1f else 0.5f)
                         )
                         PlayerBadge(
-                            "Player 1", game.scores[0], u,
+                            names[0], game.scores[0], u,
                             Modifier.align(Alignment.BottomEnd).padding(end = u * 11f)
                                 .alpha(if (game.activePlayer == 0) 1f else 0.5f)
                         )
@@ -229,8 +262,8 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
                     pick = game.pick,
                     onPick = { tag -> if (!game.isComputerTurn) scope.launch { game.onPiecePicked(tag) } },
                     onBoardTap = { row, col -> if (!game.isComputerTurn) scope.launch { game.onBoardTap(row, col) } },
-                    yardLabels = if (tournament) listOf("Player 2", "Player 3", "Player 1", "Player 4")
-                    else listOf("Player 2", "Player 1", "Player 1", "Player 2")
+                    yardLabels = if (tournament) listOf(names[1], names[2], names[0], names[3])
+                    else listOf(names[1], names[0], names[0], names[1])
                 )
 
                 // Bottom: dice indicators (blue = first die, red = total, green = second die)
@@ -244,19 +277,19 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
                 if (tournament) {
                     Row(Modifier.width(u * 100f), horizontalArrangement = Arrangement.SpaceBetween) {
                         PlayerBadge(
-                            "Player 1", game.scores[0], u,
+                            names[0], game.scores[0], u,
                             Modifier.padding(start = u * 12f).alpha(if (game.activePlayer == 0) 1f else 0.5f),
                             Palette.Red.base
                         )
                         PlayerBadge(
-                            "Player 4", game.scores[3], u,
+                            names[3], game.scores[3], u,
                             Modifier.padding(end = u * 11f).alpha(if (game.activePlayer == 3) 1f else 0.5f),
                             Palette.Blue.base
                         )
                     }
                 } else {
                     TurnPill(
-                        if (over) "Player ${game.winner + 1} Wins!" else "Player ${game.activePlayer + 1} Turn",
+                        turnText(game, names),
                         u,
                         textScale = 0.75f
                     )
@@ -281,6 +314,46 @@ fun LudoScreen(game: LudoGame, scope: CoroutineScope, onExit: () -> Unit) {
                 u = u
             )
         }
+    }
+
+    when (dialog) {
+        "menu" -> MenuDialog(
+            onChangeNames = { dialog = "names" },
+            onRestart = {
+                dialog = "none"
+                scope.launch { game.restartRound() }
+            },
+            onResign = { dialog = "resign" },
+            onExit = {
+                dialog = "none"
+                onHome()
+            },
+            onClose = { dialog = "none" }
+        )
+        "resign" -> ResignDialog(
+            message = "A point will be awarded to ${names[game.resignBeneficiary(0)]}. Do you want to resign?",
+            onConfirm = {
+                dialog = "none"
+                scope.launch { game.resign(0) }
+            },
+            onCancel = { dialog = "menu" }
+        )
+        "names" -> ChangeNamesDialog(names, onClose = { dialog = "none" })
+    }
+
+    if (over) {
+        WinnerPage(
+            winnerName = names[game.winner.coerceAtLeast(0)],
+            names = names.names.toList(),
+            scores = game.scores.toList().let { sc -> List(PlayerNames.COUNT) { sc.getOrElse(it) { 0 } } },
+            tournament = tournament,
+            onNext = { game.nextGame() },
+            onModes = {
+                game.nextGame()
+                onModes()
+            }
+        )
+    }
     }
 }
 

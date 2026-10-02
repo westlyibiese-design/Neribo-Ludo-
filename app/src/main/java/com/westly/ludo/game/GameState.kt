@@ -199,8 +199,11 @@ class LudoGame(val tournament: Boolean = false) {
      */
     private val computerSeats: Set<Int> = if (tournament) setOf(1, 2, 3) else setOf(1)
 
+    /** Set while a resign / restart waits for the board to settle, so no computer starts a new action. */
+    private var halting = false
+
     val isComputerTurn: Boolean
-        get() = activePlayer in computerSeats && phase != Phase.GameOver
+        get() = activePlayer in computerSeats && phase != Phase.GameOver && !halting
 
     /** The color a player controls in Tournament (index 0..3). */
     fun tournamentColor(player: Int): LudoColor = TOURNAMENT_COLORS[player]
@@ -215,6 +218,7 @@ class LudoGame(val tournament: Boolean = false) {
         private set
 
     private var computerBusy = false
+    private val stopComputer: Boolean get() = paused || halting
     private val computers: List<ComputerPlayer> =
         if (tournament) (1..3).map { ComputerPlayer(it, listOf(TOURNAMENT_COLORS[it])) }
         else listOf(ComputerPlayer(1, listOf(LudoColor.GREEN, LudoColor.BLUE)))
@@ -285,22 +289,22 @@ class LudoGame(val tournament: Boolean = false) {
         if (computerBusy) return
         computerBusy = true
         try {
-            while (isComputerTurn && !paused) {
+            while (isComputerTurn && !stopComputer) {
                 val ai = computers.first { it.playerIndex == activePlayer }
                 when (phase) {
                     Phase.AwaitRoll -> {
                         delay(1000)                       // hand reaches the dice
-                        if (paused) return
+                        if (stopComputer) return
                         roll()
                     }
                     Phase.Choose -> {
                         val move = ai.chooseMove(this) ?: return
                         plannedMove = move
                         delay(800)                        // hand points at the movement circle
-                        if (paused) { plannedMove = null; return }
+                        if (stopComputer) { plannedMove = null; return }
                         computerOption = move.option      // display only: hand moves on to the seed
                         delay(700)                        // hand moves to the seed
-                        if (paused) { plannedMove = null; return }
+                        if (stopComputer) { plannedMove = null; return }
                         // The computer's own internal move: no human dice control is used.
                         executeMove(move.piece, move.option)
                         plannedMove = null
@@ -310,7 +314,7 @@ class LudoGame(val tournament: Boolean = false) {
                         val victim = ai.chooseVictim(this) ?: return
                         plannedVictim = victim
                         delay(900)
-                        if (paused) { plannedVictim = null; return }
+                        if (stopComputer) { plannedVictim = null; return }
                         resolveCapture(victim)            // internal: not the human pick handler
                         plannedVictim = null
                     }
@@ -455,10 +459,79 @@ class LudoGame(val tournament: Boolean = false) {
         resetRound()
     }
 
-    /** All 8 seeds of the active player are winning seeds: that player scores 1, then a fresh round starts. */
+    /** All winning seeds of the active player are home or captured: that player scores 1 and the winner page shows. */
     private fun completeRound() {
         scores[activePlayer] = scores[activePlayer] + 1
+        winner = activePlayer
+        pick = null
+        pendingMover = null
+        phase = Phase.GameOver
+    }
+
+    /** Starts the next round with the same players and mode. Scores are kept. */
+    fun nextGame() {
         resetRound()
+    }
+
+    private val stablePhases = setOf(Phase.AwaitRoll, Phase.Choose, Phase.CaptureChoose, Phase.GameOver)
+
+    /** Waits (up to about 20 seconds) until no move or computer action is half way through. */
+    private suspend fun settle() {
+        var waited = 0
+        while ((phase !in stablePhases || computerBusy) && waited < 400) {
+            delay(50)
+            waited++
+        }
+    }
+
+    /** Menu > Restart: a fresh round with the same players. Scores are kept. */
+    suspend fun restartRound() {
+        halting = true
+        try {
+            settle()
+            resetRound()
+        } finally {
+            halting = false
+        }
+    }
+
+    private fun seedsOut(player: Int): Int = pieces.count { it.color in colorsOf(player) && it.won }
+
+    private fun distance(player: Int): Int =
+        pieces.filter { it.color in colorsOf(player) }.sumOf { if (it.won) Route.CENTER else maxOf(it.progress, 0) }
+
+    /** Most seeds out (captured or home) leads. If equal, the one whose seeds are closest to home leads. */
+    private fun leaderAmong(candidates: List<Int>): Int {
+        var best = candidates.first()
+        for (c in candidates.drop(1)) {
+            val a = seedsOut(c)
+            val b = seedsOut(best)
+            if (a > b || (a == b && distance(c) > distance(best))) best = c
+        }
+        return best
+    }
+
+    /** Who receives the point if [player] resigns right now: the opponent, or the tournament leader. */
+    fun resignBeneficiary(player: Int = 0): Int =
+        if (!tournament) (player + 1) % playerCount
+        else leaderAmong((0 until playerCount).filter { it != player })
+
+    /** Menu > Resign: the point goes to [resignBeneficiary] and the winner page shows. */
+    suspend fun resign(player: Int = 0) {
+        halting = true
+        try {
+            settle()
+            if (phase == Phase.GameOver) return
+            val to = resignBeneficiary(player)
+            scores[to] = scores[to] + 1
+            winner = to
+            pick = null
+            pendingMover = null
+            selectedDie = -1
+            phase = Phase.GameOver
+        } finally {
+            halting = false
+        }
     }
 
     /** Fresh round: every seed back in its house, no winning seeds, clean dice. Scores are kept. */
@@ -489,17 +562,17 @@ class LudoGame(val tournament: Boolean = false) {
     suspend fun roll() {
         if (phase != Phase.AwaitRoll) return
         phase = Phase.Rolling
-        repeat(9) {
+        repeat(9) { i ->
             face1 = Random.nextInt(1, 7)
             face2 = Random.nextInt(1, 7)
-            sounds.roll()
+            if (i == 0) sounds.roll()   // one recorded roll sound for the whole roll
             delay(60)
         }
         val a = Random.nextInt(1, 7)
         val b = Random.nextInt(1, 7)
         face1 = a
         face2 = b
-        sounds.land()
+        sounds.dieLand()
         die1 = a
         die2 = b
         used1 = false
