@@ -72,8 +72,17 @@ fun PlayerBadge(name: String, score: Int, unit: Dp, modifier: Modifier = Modifie
 }
 
 @Composable
-fun TurnPill(text: String, unit: Dp, modifier: Modifier = Modifier, textScale: Float = 1f) {
-    Pill(text, unit * 5.4f * textScale, modifier.width(unit * 41f).height(unit * 9.3f))
+fun TurnPill(
+    text: String,
+    unit: Dp,
+    modifier: Modifier = Modifier,
+    textScale: Float = 1f,
+    widthUnits: Float = 41f,
+    fitChars: Int = 0
+) {
+    // Family: a longer line ("Pass the phone to Joy") gets a wider pill and shrinks if it is very long.
+    val fit = if (fitChars > 0 && text.length > fitChars) fitChars.toFloat() / text.length else 1f
+    Pill(text, unit * 5.4f * textScale * fit, modifier.width(unit * widthUnits).height(unit * 9.3f))
 }
 
 internal fun DrawScope.drawGlossyDisc(c: Offset, r: Float, sw: Swatch) {

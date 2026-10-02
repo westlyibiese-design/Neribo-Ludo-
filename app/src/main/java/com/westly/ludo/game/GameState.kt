@@ -45,7 +45,32 @@ class Piece(val color: LudoColor, val slot: Int) {
  * You & Computer: Player 1 owns yellow + red, Player 2 owns green + blue (as labelled on the yards).
  * Tournament: four independent players with one color (4 seeds) each, no teams.
  */
-class LudoGame(val tournament: Boolean = false) {
+class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
+    /**
+     * Family: humans only on one phone, no computers. 2 players follow the You & Computer rules,
+     * 3 or 4 players follow the Tournament rules. Player 1..4 = red, green, yellow, blue.
+     */
+    val family: Boolean get() = familyPlayers > 0
+
+    /** The names typed for a Family game (index = player). Only used when [family] is true. */
+    val familyNames = mutableStateListOf<String>().apply { for (i in 0 until familyPlayers) add("Player ${i + 1}") }
+
+    fun familyName(i: Int): String = familyNames.getOrElse(i) { "" }
+
+    /** Sets the Family names: at most 10 letters each, an empty name becomes "Player N". */
+    fun setFamilyNames(list: List<String>) {
+        for (i in 0 until familyNames.size) {
+            val t = list.getOrElse(i) { "" }.trim().take(10)
+            familyNames[i] = if (t.isEmpty()) "Player ${i + 1}" else t
+        }
+    }
+
+    /** How many players start a Tournament-style game: 4, or 3 in a 3-player Family game. */
+    private val startPlayers: Int get() = if (family) familyPlayers else 4
+
+    /** True when the active player rolled a double six and goes again (no "pass the phone"). */
+    var bonusRoll by mutableStateOf(false)
+
     val pieces: List<Piece> = LudoColor.values().flatMap { c -> (0..3).map { Piece(c, it) } }
 
     private val sounds by lazy { Sounds() }
@@ -64,7 +89,7 @@ class LudoGame(val tournament: Boolean = false) {
     // ------------------------------------------------------------------
 
     /** Which players are still in the tournament (index = player). */
-    val active = mutableStateListOf(true, true, true, true)
+    val active = mutableStateListOf(true, true, true, true).also { if (familyPlayers == 3) it[3] = false }
 
     /** 1 = four players, 2 = three players, 3 = the final (two players). */
     var round by mutableIntStateOf(1)
@@ -258,7 +283,7 @@ class LudoGame(val tournament: Boolean = false) {
      * Player 1 is always the human. You & Computer: Player 2 is the computer.
      * Tournament: Players 2, 3 and 4 are three independent computers.
      */
-    private val computerSeats: Set<Int> = if (tournament) setOf(1, 2, 3) else setOf(1)
+    private val computerSeats: Set<Int> = if (family) emptySet() else if (tournament) setOf(1, 2, 3) else setOf(1)
 
     /** Set while a resign / restart waits for the board to settle, so no computer starts a new action. */
     private var halting = false
@@ -289,7 +314,8 @@ class LudoGame(val tournament: Boolean = false) {
     private val fastMul: Float get() = if (fast) 0.25f else 1f
     private val pace: Float get() = computerSpeed * fastMul
     private val computers: List<ComputerPlayer> =
-        if (tournament) (1..3).map { ComputerPlayer(it, listOf(TOURNAMENT_COLORS[it])) }
+        if (family) emptyList()
+        else if (tournament) (1..3).map { ComputerPlayer(it, listOf(TOURNAMENT_COLORS[it])) }
         else listOf(ComputerPlayer(1, listOf(LudoColor.GREEN, LudoColor.BLUE)))
 
     /** Every (movement option, seed) pair that is legal right now for the active player. */
@@ -436,6 +462,10 @@ class LudoGame(val tournament: Boolean = false) {
         o.put("face1", face1)
         o.put("face2", face2)
         o.put("movedThisRoll", movedThisRoll)
+        if (family) {
+            o.put("fPlayers", familyPlayers)
+            o.put("fNames", JSONArray().also { a -> familyNames.forEach { a.put(it) } })
+        }
         if (tournament) {
             o.put("tActive", JSONArray().also { a -> active.forEach { a.put(it) } })
             o.put("tRound", round)
@@ -475,10 +505,16 @@ class LudoGame(val tournament: Boolean = false) {
             if (sc != null && sc.length() == playerCount) {
                 for (i in 0 until playerCount) scores[i] = sc.getInt(i)
             }
+            if (family) {
+                o.optJSONArray("fNames")?.let { a ->
+                    for (i in 0 until minOf(a.length(), familyNames.size)) familyNames[i] = a.getString(i)
+                }
+            }
             movingPiece = null
             pendingMover = null
             returning = null
             pick = null
+            bonusRoll = false
             if (tournament) restoreTournament(o)
             activePlayer = o.getInt("activePlayer")
             if (tournament && activePlayer !in 0..3) activePlayer = firstActive()
@@ -515,7 +551,8 @@ class LudoGame(val tournament: Boolean = false) {
     private fun restoreTournament(o: JSONObject) {
         val ac = o.optJSONArray("tActive")
         for (i in 0 until 4) active[i] = if (ac != null && ac.length() == 4) ac.optBoolean(i, true) else true
-        if (activeCount() < 2) for (i in 0 until 4) active[i] = true
+        if (activeCount() < 2) for (i in 0 until 4) active[i] = i < startPlayers
+        if (family) for (i in startPlayers until 4) active[i] = false
         round = o.optInt("tRound", 1).coerceIn(1, 3)
         eliminatedOrder.clear()
         o.optJSONArray("tElim")?.let { a -> for (i in 0 until a.length()) eliminatedOrder.add(a.getInt(i)) }
@@ -564,6 +601,7 @@ class LudoGame(val tournament: Boolean = false) {
             return
         }
         val extraRoll = die1 == 6 && die2 == 6
+        bonusRoll = extraRoll
         die1 = 0
         die2 = 0
         used1 = false
@@ -688,6 +726,7 @@ class LudoGame(val tournament: Boolean = false) {
         movedThisRoll = false
         activePlayer = if (tournament) firstActive() else 0
         winner = -1
+        bonusRoll = false
         die1 = 0
         die2 = 0
         used1 = false
@@ -726,14 +765,13 @@ class LudoGame(val tournament: Boolean = false) {
         tournament && !active[TOURNAMENT_COLORS.indexOf(color)]
 
     /** Banner text for a round: "Round 1 - 4 Players", "Round 2 - 3 Players", "Round 3 - Final". */
-    fun roundTitle(r: Int = round): String = when (r) {
-        1 -> "Round 1 - 4 Players"
-        2 -> "Round 2 - 3 Players"
-        else -> "Round 3 - Final"
+    fun roundTitle(r: Int = round): String {
+        val players = startPlayers - r + 1
+        return if (players <= 2) "Round $r - Final" else "Round $r - $players Players"
     }
 
     private fun resetTournamentState() {
-        for (i in 0 until 4) active[i] = true
+        for (i in 0 until 4) active[i] = i < startPlayers
         round = 1
         eliminatedOrder.clear()
         spectator = false
@@ -821,7 +859,7 @@ class LudoGame(val tournament: Boolean = false) {
     /** Round Result screen: Next Round (or Continue when the human is out and still has to choose). */
     fun resultNext() {
         if (overlay != TOverlay.RESULT) return
-        if (!active[0] && !spectator) {
+        if (!family && !active[0] && !spectator) {
             overlay = TOverlay.OUT
             return
         }
@@ -833,7 +871,7 @@ class LudoGame(val tournament: Boolean = false) {
         val after = resultEnder
         overlay = TOverlay.NONE
         resetRound()
-        round = (5 - activeCount()).coerceIn(1, 3)
+        round = (startPlayers + 1 - activeCount()).coerceIn(1, 3)
         activePlayer = if (after in 0..3) nextActiveAfter(after) else firstActive()
         bannerPending = true
     }
@@ -878,9 +916,19 @@ class LudoGame(val tournament: Boolean = false) {
     /** The human taps their own dice on the Tie-Break screen. */
     suspend fun tieHumanRoll() {
         if (overlay != TOverlay.TIEBREAK || tieRolling >= 0) return
+        if (family) {
+            // Family: every tied player is a human and taps in turn.
+            val next = tieTurn
+            if (next >= 0) rollTieDie(next)
+            return
+        }
         if (0 !in tieIds || tieRolls[0] != 0) return
         rollTieDie(0)
     }
+
+    /** Family tie-break: the tied player who has to tap next (-1 = nobody / a roll is in progress). */
+    val tieTurn: Int
+        get() = if (tieRolling >= 0) -1 else tieIds.firstOrNull { tieRolls[it] == 0 } ?: -1
 
     private suspend fun rollTieDie(p: Int) {
         tieRolling = p
@@ -910,7 +958,7 @@ class LudoGame(val tournament: Boolean = false) {
                 delay((1500 * fastMul).toLong())   // everybody can see the numbers
                 if (overlay != TOverlay.TIEBREAK) return
                 resolveTie()
-            } else if (0 in pending || tieRolling >= 0) {
+            } else if (family || 0 in pending || tieRolling >= 0) {
                 delay(100)                         // waiting for the human, or a roll is in progress
             } else {
                 delay((800 * fastMul).toLong())
@@ -972,6 +1020,7 @@ class LudoGame(val tournament: Boolean = false) {
         phase = Phase.Pausing
         delay(((if (movedThisRoll) 500L else 1200L) * fastMul).toLong())
         val extraRoll = die1 == 6 && die2 == 6   // only a double six gives another roll
+        bonusRoll = extraRoll
         die1 = 0
         die2 = 0
         used1 = false

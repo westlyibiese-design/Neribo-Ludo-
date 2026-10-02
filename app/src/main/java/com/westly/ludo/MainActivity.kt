@@ -61,6 +61,9 @@ import com.westly.ludo.ui.ChangeNamesDialog
 import com.westly.ludo.ui.ConfigurationScreen
 import com.westly.ludo.ui.CounterOrb
 import com.westly.ludo.ui.ExitButton
+import com.westly.ludo.ui.FamilyCountScreen
+import com.westly.ludo.ui.FamilyNamesDialog
+import com.westly.ludo.ui.FamilyNamesScreen
 import com.westly.ludo.ui.GameModeScreen
 import com.westly.ludo.ui.HandGuide
 import com.westly.ludo.ui.FooterSpace
@@ -85,6 +88,7 @@ import com.westly.ludo.ui.PlayerBadge
 import com.westly.ludo.ui.PointingHand
 import com.westly.ludo.ui.Swatch
 import com.westly.ludo.ui.TurnPill
+import org.json.JSONObject
 import kotlin.math.sin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -94,6 +98,10 @@ class MainActivity : ComponentActivity() {
     private val game = LudoGame()
     // Tournament is a separate game with its own state, score and save slot.
     private val tournament = LudoGame(tournament = true)
+
+    // Family (humans only, one phone) is a third game with its own save slot. It is created when the
+    // players pick 2 / 3 / 4 and type their names, and thrown away by End Game / End Tournament.
+    private var family by mutableStateOf<LudoGame?>(null)
 
     private fun prefs() = getSharedPreferences("ludomate", Context.MODE_PRIVATE)
 
@@ -107,6 +115,10 @@ class MainActivity : ComponentActivity() {
         prefs().edit()
             .putString("save", game.toSaveString())
             .putString("tournament_save", tournament.toSaveString())
+            .also { e ->
+                val f = family
+                if (f != null) e.putString("family_save", f.toSaveString()) else e.remove("family_save")
+            }
             .apply()
     }
 
@@ -116,7 +128,28 @@ class MainActivity : ComponentActivity() {
         Sounds.appContext = applicationContext
         prefs().getString("save", null)?.let { game.restore(it) }
         prefs().getString("tournament_save", null)?.let { tournament.restore(it) }
-        setContent { LudoApp(game, tournament, names, settings) }
+        prefs().getString("family_save", null)?.let { saved ->
+            try {
+                val n = JSONObject(saved).optInt("fPlayers", 0)
+                if (n in 2..4) family = LudoGame(tournament = n >= 3, familyPlayers = n).also { it.restore(saved) }
+            } catch (e: Exception) {
+                family = null
+            }
+        }
+        setContent {
+            LudoApp(
+                game, tournament, names, settings,
+                familyGame = family,
+                onFamilyCreate = { count, list ->
+                    family = LudoGame(tournament = count >= 3, familyPlayers = count).also { it.setFamilyNames(list) }
+                    saveGame()
+                },
+                onFamilyEnd = {
+                    family = null
+                    saveGame()
+                }
+            )
+        }
     }
 
     override fun onPause() {
@@ -132,14 +165,25 @@ class MainActivity : ComponentActivity() {
 
 /** Intro -> home -> settings / game modes -> the chosen game. */
 @Composable
-fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames, settings: GameSettings) {
+fun LudoApp(
+    game: LudoGame,
+    tournament: LudoGame,
+    names: PlayerNames,
+    settings: GameSettings,
+    familyGame: LudoGame? = null,
+    onFamilyCreate: (Int, List<String>) -> Unit = { _, _ -> },
+    onFamilyEnd: () -> Unit = {}
+) {
     // One scope for the whole app screen, so a move in progress is not cut off when leaving a game.
     val scope = rememberCoroutineScope()
     var screen by rememberSaveable { mutableStateOf("intro") }
+    // How many people the Family players picked (used while typing their names).
+    var familyCount by rememberSaveable { mutableStateOf(2) }
 
     BackHandler(enabled = screen != "intro" && screen != "home") {
         screen = when (screen) {
-            "game", "tournament" -> "modes"
+            "game", "tournament", "family", "family_count" -> "modes"
+            "family_names" -> "family_count"
             "config", "sound", "rules" -> "settings"
             else -> "home"
         }
@@ -163,8 +207,36 @@ fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames, settings: 
                 "modes" -> GameModeScreen(
                     onBack = { screen = "home" },
                     onYouAndComputer = { screen = "game" },
-                    onTournament = { screen = "tournament" }
+                    onTournament = { screen = "tournament" },
+                    onFamily = { screen = if (familyGame != null) "family" else "family_count" },
+                    familyActive = familyGame != null
                 )
+                "family_count" -> FamilyCountScreen(
+                    onBack = { screen = "modes" },
+                    onPick = { count ->
+                        familyCount = count
+                        screen = "family_names"
+                    }
+                )
+                "family_names" -> FamilyNamesScreen(
+                    count = familyCount,
+                    onBack = { screen = "family_count" },
+                    onStart = { list ->
+                        onFamilyCreate(familyCount, list)
+                        screen = "family"
+                    }
+                )
+                "family" -> familyGame?.let { fg ->
+                    LudoScreen(
+                        fg, scope, names, settings,
+                        onModes = { screen = "modes" },
+                        onHome = { screen = "home" },
+                        onEndFamily = {
+                            onFamilyEnd()
+                            screen = "family_count"
+                        }
+                    )
+                }
                 "game" -> LudoScreen(game, scope, names, settings, onModes = { screen = "modes" }, onHome = { screen = "home" })
                 "tournament" -> LudoScreen(tournament, scope, names, settings, onModes = { screen = "modes" }, onHome = { screen = "home" })
             }
@@ -176,10 +248,16 @@ fun LudoApp(game: LudoGame, tournament: LudoGame, names: PlayerNames, settings: 
     }
 }
 
-private fun turnText(game: LudoGame, names: PlayerNames): String = when {
-    game.phase == Phase.GameOver -> "${names[game.winner.coerceAtLeast(0)]} Wins!"
+private fun turnText(game: LudoGame, nm: (Int) -> String): String = when {
+    game.phase == Phase.GameOver -> "${nm(game.winner.coerceAtLeast(0))} Wins!"
+    game.family -> when {
+        // Family: the phone is handed over before the roll; after a double six the same player rolls again.
+        game.phase == Phase.AwaitRoll && game.bonusRoll -> "${nm(game.activePlayer)} Rolls Again"
+        game.phase == Phase.AwaitRoll -> "Pass the phone to ${nm(game.activePlayer)}"
+        else -> "${nm(game.activePlayer)}'s Turn"
+    }
     game.activePlayer == 0 -> "Your Turn"
-    else -> "${names[game.activePlayer]} Turn"
+    else -> "${nm(game.activePlayer)} Turn"
 }
 
 /**
@@ -194,9 +272,14 @@ fun LudoScreen(
     names: PlayerNames,
     settings: GameSettings,
     onModes: () -> Unit,
-    onHome: () -> Unit
+    onHome: () -> Unit,
+    onEndFamily: () -> Unit = {}
 ) {
     val tournament = game.tournament
+    // Names shown on screen: Family has its own names, the other modes use the saved player names.
+    val nm: (Int) -> String = { i -> if (game.family) game.familyName(i) else names[i] }
+    val nameList: List<String> = if (game.family) game.familyNames.toList() else names.names.toList()
+    val endLabel = if (tournament) "End Tournament" else "End Game"
 
     // Configuration: computer speed and level, and the board type pictures for the four houses.
     SideEffect {
@@ -284,31 +367,33 @@ fun LudoScreen(
                     }
                     if (tournament) {
                         TurnPill(
-                            turnText(game, names),
+                            turnText(game, nm),
                             u,
                             Modifier.align(Alignment.TopCenter).padding(top = u * 2f),
-                            textScale = 0.75f
+                            textScale = 0.75f,
+                            widthUnits = if (game.family) 66f else 41f,
+                            fitChars = if (game.family) 24 else 0
                         )
                         PlayerBadge(
-                            names[1], game.scores[1], u,
+                            nm(1), game.scores[1], u,
                             Modifier.align(Alignment.BottomStart).padding(start = u * 12f)
                                 .alpha(if (game.activePlayer == 1) 1f else 0.5f),
                             Palette.Green.base
                         )
                         PlayerBadge(
-                            names[2], game.scores[2], u,
+                            nm(2), game.scores[2], u,
                             Modifier.align(Alignment.BottomEnd).padding(end = u * 11f)
                                 .alpha(if (game.activePlayer == 2) 1f else 0.5f),
                             Palette.Yellow.base
                         )
                     } else {
                         PlayerBadge(
-                            names[1], game.scores[1], u,
+                            nm(1), game.scores[1], u,
                             Modifier.align(Alignment.BottomStart).padding(start = u * 12f)
                                 .alpha(if (game.activePlayer == 1) 1f else 0.5f)
                         )
                         PlayerBadge(
-                            names[0], game.scores[0], u,
+                            nm(0), game.scores[0], u,
                             Modifier.align(Alignment.BottomEnd).padding(end = u * 11f)
                                 .alpha(if (game.activePlayer == 0) 1f else 0.5f)
                         )
@@ -326,8 +411,8 @@ fun LudoScreen(
                     pick = game.pick,
                     onPick = { tag -> if (!game.isComputerTurn) scope.launch { game.onPiecePicked(tag) } },
                     onBoardTap = { row, col -> if (!game.isComputerTurn && !game.bannerPending) scope.launch { game.onBoardTap(row, col) } },
-                    yardLabels = if (tournament) listOf(names[1], names[2], names[0], names[3])
-                    else listOf(names[1], names[0], names[0], names[1]),
+                    yardLabels = if (tournament) listOf(nm(1), nm(2), nm(0), nm(3))
+                    else listOf(nm(1), nm(0), nm(0), nm(1)),
                     yardImages = yardImages,
                     // green, yellow, red, blue = players 1, 2, 0, 3
                     outYards = if (tournament) listOf(!game.active[1], !game.active[2], !game.active[0], !game.active[3]) else emptyList()
@@ -344,21 +429,26 @@ fun LudoScreen(
                 if (tournament) {
                     Row(Modifier.width(u * 100f), horizontalArrangement = Arrangement.SpaceBetween) {
                         PlayerBadge(
-                            names[0], game.scores[0], u,
+                            nm(0), game.scores[0], u,
                             Modifier.padding(start = u * 12f).alpha(if (game.activePlayer == 0) 1f else 0.5f),
                             Palette.Red.base
                         )
-                        PlayerBadge(
-                            names[3], game.scores[3], u,
-                            Modifier.padding(end = u * 11f).alpha(if (game.activePlayer == 3) 1f else 0.5f),
-                            Palette.Blue.base
-                        )
+                        // A 3-player Family game has no blue player.
+                        if (!game.family || game.familyPlayers > 3) {
+                            PlayerBadge(
+                                nm(3), game.scores[3], u,
+                                Modifier.padding(end = u * 11f).alpha(if (game.activePlayer == 3) 1f else 0.5f),
+                                Palette.Blue.base
+                            )
+                        }
                     }
                 } else {
                     TurnPill(
-                        turnText(game, names),
+                        turnText(game, nm),
                         u,
-                        textScale = 0.75f
+                        textScale = 0.75f,
+                        widthUnits = if (game.family) 66f else 41f,
+                        fitChars = if (game.family) 24 else 0
                     )
                 }
             }
@@ -407,21 +497,39 @@ fun LudoScreen(
                 onHome()
             },
             onClose = { dialog = "none" },
-            resignEnabled = !(tournament && !game.active[0])
+            resignEnabled = game.family || !(tournament && !game.active[0]),
+            // Family has no Resign: End Game / End Tournament clears everything and starts over.
+            resignLabel = if (game.family) endLabel else "Resign"
         )
-        "resign" -> ResignDialog(
-            message = if (tournament && game.activeCount() > 2) {
-                "You will be knocked out of the tournament. Do you want to resign?"
-            } else {
-                "A point will be awarded to ${names[game.resignBeneficiary(0)]}. Do you want to resign?"
-            },
-            onConfirm = {
-                dialog = "none"
-                scope.launch { game.resign(0) }
-            },
-            onCancel = { dialog = "menu" }
-        )
-        "names" -> ChangeNamesDialog(names, onClose = { dialog = "none" })
+        "resign" -> if (game.family) {
+            ResignDialog(
+                title = endLabel,
+                message = "Are you sure? Scores will be cleared.",
+                onConfirm = {
+                    dialog = "none"
+                    onEndFamily()
+                },
+                onCancel = { dialog = "menu" }
+            )
+        } else {
+            ResignDialog(
+                message = if (tournament && game.activeCount() > 2) {
+                    "You will be knocked out of the tournament. Do you want to resign?"
+                } else {
+                    "A point will be awarded to ${names[game.resignBeneficiary(0)]}. Do you want to resign?"
+                },
+                onConfirm = {
+                    dialog = "none"
+                    scope.launch { game.resign(0) }
+                },
+                onCancel = { dialog = "menu" }
+            )
+        }
+        "names" -> if (game.family) {
+            FamilyNamesDialog(game, onClose = { dialog = "none" })
+        } else {
+            ChangeNamesDialog(names, onClose = { dialog = "none" })
+        }
     }
 
     if (tournament) {
@@ -429,21 +537,25 @@ fun LudoScreen(
         when (game.overlay) {
             TOverlay.TIEBREAK -> {
                 TieBreakDialog(
-                    names = names.names.toList(),
+                    names = nameList,
                     tied = game.tieIds,
                     rolls = game.tieRolls.toList(),
                     rolling = game.tieRolling,
                     flicker = game.tieFlicker,
-                    humanCanRoll = 0 in game.tieIds && game.tieRolls[0] == 0 && game.tieRolling < 0,
-                    onRoll = { scope.launch { game.tieHumanRoll() } }
+                    // Family: every tied person is a human and taps their own dice in turn.
+                    humanCanRoll = if (game.family) game.tieTurn >= 0
+                    else 0 in game.tieIds && game.tieRolls[0] == 0 && game.tieRolling < 0,
+                    onRoll = { scope.launch { game.tieHumanRoll() } },
+                    tapPlayer = if (game.family) game.tieTurn else 0,
+                    tapMessage = if (game.family && game.tieTurn >= 0) "${nm(game.tieTurn)}, tap your dice to roll" else null
                 )
                 // The roll-off runs while this screen is open; leaving the screen stops it safely.
                 LaunchedEffect(Unit) { game.runTieBreak() }
             }
             TOverlay.RESULT -> RoundResultDialog(
                 title = "Round ${game.round} Result",
-                outLine = "${names[game.resultOut]} (${colorNames.getOrElse(game.resultOut) { "" }}) is OUT",
-                names = names.names.toList(),
+                outLine = "${nm(game.resultOut)} (${colorNames.getOrElse(game.resultOut) { "" }}) is OUT",
+                names = nameList,
                 seeds = game.resultSeeds,
                 outPlayer = game.resultOut,
                 auto = game.spectator,
@@ -464,9 +576,11 @@ fun LudoScreen(
 
     if (over) {
         WinnerPage(
-            winnerName = names[game.winner.coerceAtLeast(0)],
-            names = names.names.toList(),
-            scores = game.scores.toList().let { sc -> List(PlayerNames.COUNT) { sc.getOrElse(it) { 0 } } },
+            winnerName = nm(game.winner.coerceAtLeast(0)),
+            names = nameList,
+            scores = game.scores.toList().let { sc ->
+                List(if (game.family) game.familyPlayers else PlayerNames.COUNT) { sc.getOrElse(it) { 0 } }
+            },
             tournament = tournament,
             onNext = { game.nextGame() },
             onModes = {

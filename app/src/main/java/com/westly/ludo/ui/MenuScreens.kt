@@ -1,5 +1,6 @@
 package com.westly.ludo.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -19,17 +20,23 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
@@ -44,6 +51,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -51,15 +59,18 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import com.westly.ludo.R
 import com.westly.ludo.game.GameSettings
+import com.westly.ludo.game.LudoGame
 import com.westly.ludo.game.PlayerNames
 import kotlin.math.PI
 import kotlin.math.cos
@@ -583,6 +594,23 @@ private val RulesText: List<Pair<String, String>> = listOf(
         "If you are knocked out, you can Watch the computers finish (tap Skip to speed them up) or Leave. " +
         "If you leave, the player who won that round gets the point. " +
         "If you resign from the menu, you are knocked out at once, and if you leave, the player in front gets the point.",
+    "Family" to "Family is for people playing together on one phone, with no computers. Choose 2, 3 or 4 players, " +
+        "then type each player's name. These names are only used for that Family game. " +
+        "The top of the screen tells you whose turn it is: Pass the phone to that player.\n\n" +
+        "2 players: the You & Computer rules, but two people play. Player 1 plays yellow and red (8 seeds), " +
+        "Player 2 plays green and blue. Get all 8 seeds out as winning seeds to win the round and score 1 point.\n\n" +
+        "3 or 4 players: the Tournament rules, but everybody is a person. The colors are fixed: " +
+        "Player 1 red, Player 2 green, Player 3 yellow, Player 4 blue (a 3 player game uses red, green and yellow). " +
+        "Each player has 4 seeds. A round ends when one player gets all 4 seeds out. That player is safe and gets no point. " +
+        "The player with the fewest seeds out is knocked out. If players are tied, the one whose seeds travelled the least " +
+        "goes out. If they are still tied, each tied player taps to roll a die in turn: the lowest roll goes out, " +
+        "and a tie for lowest rolls again.\n\n" +
+        "With 4 players, Round 1 has 4 players, Round 2 has 3 players and Round 3 is the Final with 2 players. " +
+        "With 3 players, Round 1 has 3 players and Round 2 is the Final with 2 players. " +
+        "The first player to get all 4 seeds out in the Final wins and gets 1 point.\n\n" +
+        "A double six gives the same player another roll. Restart keeps the scores. " +
+        "End Game (End Tournament with 3 or 4 players) clears the scores and starts Family again, " +
+        "so you choose the number of players and type the names again.",
     "Tips" to "The blue menu button (top left) lets you change names, restart the round, resign or exit. " +
         "The orange X (top right) goes back to Game Mode. Your game is saved by itself, " +
         "so you can close the app and come back."
@@ -643,7 +671,13 @@ fun RulesScreen(onClose: () -> Unit) {
 // ---------------------------------------------------------------------------
 
 @Composable
-fun GameModeScreen(onBack: () -> Unit, onYouAndComputer: () -> Unit, onTournament: () -> Unit) {
+fun GameModeScreen(
+    onBack: () -> Unit,
+    onYouAndComputer: () -> Unit,
+    onTournament: () -> Unit,
+    onFamily: () -> Unit = {},
+    familyActive: Boolean = false
+) {
     MenuBackground(R.drawable.bg_modes) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val u = minOf(maxWidth / 100f, maxHeight / 170f)
@@ -670,9 +704,191 @@ fun GameModeScreen(onBack: () -> Unit, onYouAndComputer: () -> Unit, onTournamen
                     subtitle = "4 players", onClick = onTournament
                 )
                 Spacer(Modifier.height(u * 4f))
-                GlossButton("Family", Palette.Green, u * 78f, u * 18f, subtitle = "Coming soon", dimmed = true)
+                GlossButton(
+                    "Family", Palette.Green, u * 78f, u * 18f,
+                    subtitle = if (familyActive) "Resume game" else "2, 3 or 4 players", onClick = onFamily
+                )
                 Spacer(Modifier.height(u * 4f))
                 GlossButton("Connect and Play", Palette.Red, u * 78f, u * 18f, subtitle = "Coming soon", dimmed = true)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Family: choose 2 / 3 / 4 players, type their names, change names during the game.
+// Humans only, one phone. These names are only for Family (not the Change Names in Settings).
+// ---------------------------------------------------------------------------
+
+/** The colour dots shown next to a Family player: 2 players own two colours each, 3 or 4 players one each. */
+private fun familyDots(count: Int, index: Int): List<Color> = when {
+    count == 2 && index == 0 -> listOf(Palette.Red.base, Palette.Yellow.base)
+    count == 2 -> listOf(Palette.Green.base, Palette.Blue.base)
+    else -> listOf(listOf(Palette.Red.base, Palette.Green.base, Palette.Yellow.base, Palette.Blue.base)[index])
+}
+
+@Composable
+private fun FamilyNameRow(u: Dp, dots: List<Color>, value: String, hint: String, onChange: (String) -> Unit) {
+    val focus = LocalFocusManager.current
+    val shape = RoundedCornerShape(50)
+    Row(
+        Modifier
+            .width(u * 84f)
+            .height(u * 12.5f)
+            .background(Brush.verticalGradient(listOf(Color(0xFF14566A), Color(0xFF0B3340))), shape)
+            .border(1.dp, Palette.PillEdge, shape)
+            .padding(horizontal = u * 3.5f),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        for (c in dots) {
+            Box(Modifier.size(u * 5.6f).background(c, CircleShape).border(1.dp, Color.White.copy(alpha = 0.6f), CircleShape))
+            Spacer(Modifier.width(u * 1.2f))
+        }
+        Spacer(Modifier.width(u * 1.5f))
+        BasicTextField(
+            value = value,
+            onValueChange = { onChange(it.take(10)) },
+            singleLine = true,
+            textStyle = TextStyle(color = Color.White, fontSize = (u * 5.4f).sp(), fontWeight = FontWeight.ExtraBold),
+            cursorBrush = SolidColor(Color.White),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }),
+            modifier = Modifier.weight(1f),
+            decorationBox = { inner ->
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                    if (value.isEmpty()) {
+                        BasicText(
+                            hint,
+                            style = TextStyle(
+                                color = Color.White.copy(alpha = 0.35f),
+                                fontSize = (u * 5.4f).sp(),
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        )
+                    }
+                    inner()
+                }
+            }
+        )
+    }
+}
+
+/** Family step 1: how many people are playing. */
+@Composable
+fun FamilyCountScreen(onBack: () -> Unit, onPick: (Int) -> Unit) {
+    MenuBackground(R.drawable.bg_modes) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val u = minOf(maxWidth / 100f, maxHeight / 170f)
+            Column(
+                Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Box(Modifier.fillMaxWidth().padding(horizontal = u * 3f)) {
+                    GlossButton(
+                        "Family", Palette.Green, u * 56f, u * 14f,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                    ExitButton(
+                        u * 11.8f,
+                        Modifier.align(Alignment.CenterEnd).clickable { onBack() }
+                    )
+                }
+                Spacer(Modifier.height(u * 8f))
+                GlossButton("2 Players", Palette.Blue, u * 78f, u * 18f, subtitle = "2 colors each", onClick = { onPick(2) })
+                Spacer(Modifier.height(u * 4f))
+                GlossButton("3 Players", Palette.Orange, u * 78f, u * 18f, subtitle = "Knock-out rounds", onClick = { onPick(3) })
+                Spacer(Modifier.height(u * 4f))
+                GlossButton("4 Players", Palette.Red, u * 78f, u * 18f, subtitle = "Knock-out rounds", onClick = { onPick(4) })
+            }
+        }
+    }
+}
+
+/** Family step 2: type the names of the [count] players, then start. */
+@Composable
+fun FamilyNamesScreen(count: Int, onBack: () -> Unit, onStart: (List<String>) -> Unit) {
+    val edits = remember(count) { mutableStateListOf<String>().apply { repeat(count) { add("") } } }
+    MenuBackground(R.drawable.bg_modes) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val u = minOf(maxWidth / 100f, maxHeight / 170f)
+            Column(
+                Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Spacer(Modifier.height(u * 8f))
+                Box(Modifier.fillMaxWidth().padding(horizontal = u * 3f)) {
+                    GlossButton(
+                        "Names", Palette.Green, u * 56f, u * 14f,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                    ExitButton(
+                        u * 11.8f,
+                        Modifier.align(Alignment.CenterEnd).clickable { onBack() }
+                    )
+                }
+                Spacer(Modifier.height(u * 8f))
+                for (i in 0 until count) {
+                    FamilyNameRow(u, familyDots(count, i), edits[i], "Player ${i + 1}") { edits[i] = it }
+                    Spacer(Modifier.height(u * 3f))
+                }
+                Spacer(Modifier.height(u * 5f))
+                GlossButton("Start", Palette.Green, u * 56f, u * 14f, onClick = { onStart(edits.toList()) })
+                Spacer(Modifier.height(u * 6f))
+            }
+        }
+    }
+}
+
+/** Menu > Change Names during a Family game. Only the Family names change. */
+@Composable
+fun FamilyNamesDialog(game: LudoGame, onClose: () -> Unit) {
+    BackHandler(true) { onClose() }
+    val count = game.familyPlayers
+    val edits = remember { mutableStateListOf<String>().apply { for (i in 0 until count) add(game.familyName(i)) } }
+    val block = remember { MutableInteractionSource() }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.62f))
+            .clickable(interactionSource = block, indication = null) { }
+            .systemBarsPadding()
+            .imePadding(),
+        contentAlignment = Alignment.Center
+    ) {
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val u = minOf(maxWidth / 100f, maxHeight / 150f)
+            val shape = RoundedCornerShape(u * 5f)
+            Column(
+                Modifier
+                    .width(u * 92f)
+                    .background(Color(0xFF4A2C12), shape)
+                    .border(2.dp, Palette.PillEdge, shape)
+                    .padding(vertical = u * 4f)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(Modifier.fillMaxWidth().padding(horizontal = u * 4f)) {
+                    BasicText(
+                        "Change Names",
+                        style = menuText((u * 6f).sp()),
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                    ExitButton(
+                        u * 9f,
+                        Modifier.align(Alignment.CenterEnd).clickable { onClose() }
+                    )
+                }
+                Spacer(Modifier.height(u * 4f))
+                for (i in 0 until count) {
+                    FamilyNameRow(u, familyDots(count, i), edits[i], "Player ${i + 1}") { edits[i] = it }
+                    Spacer(Modifier.height(u * 2.5f))
+                }
+                Spacer(Modifier.height(u * 3f))
+                GlossButton("Save", Palette.Green, u * 50f, u * 12f, onClick = {
+                    game.setFamilyNames(edits.toList())
+                    onClose()
+                })
             }
         }
     }

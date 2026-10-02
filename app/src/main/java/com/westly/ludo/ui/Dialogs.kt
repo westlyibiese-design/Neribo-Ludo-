@@ -214,7 +214,8 @@ fun WinnerPage(
                 if (tournament) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         PanelText("${names[2]}: ${scores[2]}", k, 30f, maxChars = 11)
-                        PanelText("${names[3]}: ${scores[3]}", k, 30f, maxChars = 11)
+                        // A 3-player Family game has no fourth player.
+                        if (names.size > 3) PanelText("${names[3]}: ${scores[3]}", k, 30f, maxChars = 11)
                     }
                 } else {
                     PanelText("${names[1]}: ${scores[1]}", k, 40f, maxChars = 9)
@@ -238,12 +239,13 @@ fun MenuDialog(
     onResign: () -> Unit,
     onExit: () -> Unit,
     onClose: () -> Unit,
-    resignEnabled: Boolean = true
+    resignEnabled: Boolean = true,
+    resignLabel: String = "Resign"
 ) {
     BackHandler(true) { onClose() }
     Scrim {
         Panel(MenuPanel, 0.86f) { k ->
-            val labels = listOf("Change Names", "Restart", "Resign", "Exit")
+            val labels = listOf("Change Names", "Restart", resignLabel, "Exit")
             val noop: () -> Unit = {}
             val actions = listOf(onChangeNames, onRestart, onResign, onExit)
             val ys = listOf(132f, 276f, 420f, 564f)
@@ -264,12 +266,12 @@ fun MenuDialog(
 // ---------------------------------------------------------------------------
 
 @Composable
-fun ResignDialog(message: String, onConfirm: () -> Unit, onCancel: () -> Unit) {
+fun ResignDialog(message: String, onConfirm: () -> Unit, onCancel: () -> Unit, title: String = "Resign") {
     BackHandler(true) { onCancel() }
     Scrim {
         Panel(ResignPanel, 0.86f) { k ->
             Box(Modifier.offset(k * 79f, k * 58f).size(k * 490f, k * 92f), contentAlignment = Alignment.Center) {
-                PanelText("Resign", k, 50f)
+                PanelText(title, k, 50f, maxChars = 12)
             }
             Box(
                 Modifier.offset(k * 79f, k * 190f).size(k * 490f, k * 180f),
@@ -385,6 +387,7 @@ fun RoundResultDialog(
             // One row per player: red, green, yellow, blue
             val tops = listOf(233f, 376f, 520f, 664f)
             for (i in 0 until 4) {
+                if (i >= names.size) continue   // a 3-player Family game has no fourth row
                 val inRound = seeds.getOrElse(i) { -1 } >= 0
                 val isOut = i == outPlayer
                 val a = if (inRound) 1f else 0.4f
@@ -431,7 +434,9 @@ fun TieBreakDialog(
     rolling: Int,
     flicker: Int,
     humanCanRoll: Boolean,
-    onRoll: () -> Unit
+    onRoll: () -> Unit,
+    tapPlayer: Int = 0,
+    tapMessage: String? = null
 ) {
     val pending = tied.filter { rolls.getOrElse(it) { 0 } == 0 }
     val message = when {
@@ -441,7 +446,7 @@ fun TieBreakDialog(
             val lows = tied.filter { rolls.getOrElse(it) { 0 } == low }
             if (lows.size == 1) "${names.getOrElse(lows[0]) { "" }} is OUT" else "Tie! Lowest roll again"
         }
-        humanCanRoll -> "Tap your dice to roll"
+        humanCanRoll -> tapMessage ?: "Tap your dice to roll"
         else -> "Highest roll stays. Lowest goes OUT."
     }
     TournamentOverlay {
@@ -463,7 +468,7 @@ fun TieBreakDialog(
                         PanelText(names.getOrElse(i) { "" }, k, 32f, maxChars = 9)
                     }
                     val v = rolls.getOrElse(i) { 0 }
-                    val canTap = i == 0 && humanCanRoll
+                    val canTap = i == tapPlayer && humanCanRoll
                     Box(
                         Modifier.offset(k * (left + 64f), k * diceY).size(k * 189f, k * 168f),
                         contentAlignment = Alignment.Center
