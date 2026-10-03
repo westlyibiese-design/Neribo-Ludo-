@@ -568,7 +568,7 @@ private fun HostLobby(session: ConnectSession, names: PlayerNames, count: Int, o
                     if (session.allowWatchers) "Allow watchers: On" else "Allow watchers: Off",
                     if (session.allowWatchers) Palette.Green else Palette.Orange,
                     u * 60f, u * 9f,
-                    onClick = { session.setAllowWatchers(!session.allowWatchers) }
+                    onClick = { session.switchWatchers(!session.allowWatchers) }
                 )
                 Spacer(Modifier.height(u * 2.5f))
                 val enabled = session.isFull

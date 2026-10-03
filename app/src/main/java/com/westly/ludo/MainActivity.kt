@@ -880,7 +880,7 @@ fun LudoScreen(
                 },
                 onClose = { dialog = "none" },
                 watchersOn = cs.allowWatchers,
-                onToggleWatchers = { cs.setAllowWatchers(!cs.allowWatchers) },
+                onToggleWatchers = { cs.switchWatchers(!cs.allowWatchers) },
                 onShowQr = { dialog = "connectQr" }
             )
             "connectQr" -> ConnectQrDialog(

@@ -596,7 +596,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     /** Host: the Allow watchers switch. */
-    fun setAllowWatchers(on: Boolean) {
+    fun switchWatchers(on: Boolean) {
         if (role != ConnectRole.HOST) return
         allowWatchers = on
         saveDirty = true
