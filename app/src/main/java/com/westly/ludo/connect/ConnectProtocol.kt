@@ -1,6 +1,8 @@
 package com.westly.ludo.connect
 
 import android.net.Uri
+import com.westly.ludo.game.HandTarget
+import com.westly.ludo.game.LudoColor
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -79,6 +81,14 @@ object ConnectProtocol {
     const val T_INTENT = "intent"
     const val T_RESYNC = "resync"
 
+    // Phase 3: live view. "ev" messages are cosmetic: a lost one never changes the game.
+    const val T_EV = "ev"
+    const val EV_ROLL = "roll"
+    const val EV_MOVE = "move"
+    const val EV_CAPTURE = "capture"
+    const val EV_TIE_ROLL = "tieRoll"
+    const val EV_HAND = "hand"
+
     // The kinds of "intent" a guest may send to the host.
     const val K_ROLL = "roll"
     const val K_SELECT_DIE = "selectDie"
@@ -145,6 +155,66 @@ object ConnectProtocol {
 
     /** Guest -> host: please send the game state again. */
     fun resync(): JSONObject = base(T_RESYNC)
+
+    // ----- Phase 3: live view events (host -> everybody) -----
+    // Every event carries "seq": the number of the "state" that will follow once the action is done.
+    // A phone that plays the event holds back that state (and later ones) until the animation ends.
+
+    private fun ev(kind: String, seq: Int): JSONObject = base(T_EV).put("k", kind).put("seq", seq)
+
+    /** The dice are about to roll for [player]; [a] and [b] are the faces they will land on. */
+    fun evRoll(seq: Int, player: Int, a: Int, b: Int): JSONObject =
+        ev(EV_ROLL, seq).put("player", player).put("a", a).put("b", b)
+
+    /** A seed walks from progress [from] to [to] in [durationMs]. [rank] is where it rests if it reaches the centre. */
+    fun evMove(seq: Int, color: String, slot: Int, from: Int, to: Int, durationMs: Long, rank: Int): JSONObject =
+        ev(EV_MOVE, seq)
+            .put("color", color).put("slot", slot)
+            .put("from", from).put("to", to)
+            .put("durationMs", durationMs).put("rank", rank)
+
+    /** The seed [color]/[slot] is sent home by the seed [moverColor]/[moverSlot]. */
+    fun evCapture(seq: Int, color: String, slot: Int, moverColor: String, moverSlot: Int): JSONObject =
+        ev(EV_CAPTURE, seq)
+            .put("color", color).put("slot", slot)
+            .put("mColor", moverColor).put("mSlot", moverSlot)
+
+    /** [player] rolls the tie-break die and gets [value]. */
+    fun evTieRoll(seq: Int, player: Int, value: Int): JSONObject =
+        ev(EV_TIE_ROLL, seq).put("player", player).put("value", value)
+
+    /** [player] is about to tap [target]; the hand enters from the side of [color]. */
+    fun evHand(seq: Int, player: Int, color: String, target: HandTarget): JSONObject {
+        val t = JSONObject()
+        when (target) {
+            HandTarget.Dice -> t.put("kind", "dice")
+            is HandTarget.Orb -> t.put("kind", "orb").put("option", target.index)
+            is HandTarget.Spot -> t.put("kind", "spot").put("row", target.row.toDouble()).put("col", target.col.toDouble())
+        }
+        return ev(EV_HAND, seq).put("player", player).put("color", color).put("target", t)
+    }
+
+    /** Reads the "target" object of a hand event; null when it is damaged. */
+    fun handTargetFromJson(o: JSONObject?): HandTarget? {
+        if (o == null) return null
+        return when (o.optString("kind", "")) {
+            "dice" -> HandTarget.Dice
+            "orb" -> {
+                val i = o.optInt("option", -1)
+                if (i in 0..2) HandTarget.Orb(i) else null
+            }
+            "spot" -> {
+                val r = o.optDouble("row", Double.NaN)
+                val c = o.optDouble("col", Double.NaN)
+                if (r.isNaN() || c.isNaN() || r < -1.0 || r > 16.0 || c < -1.0 || c > 16.0) null
+                else HandTarget.Spot(r.toFloat(), c.toFloat())
+            }
+            else -> null
+        }
+    }
+
+    /** A colour name from the wire, or null when it is not one of the four. */
+    fun colorFromName(name: String?): LudoColor? = LudoColor.values().firstOrNull { it.name == name }
 
     private fun rosterToJson(roster: List<RosterEntry>): JSONArray {
         val arr = JSONArray()

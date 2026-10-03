@@ -2,15 +2,18 @@ package com.westly.ludo.connect
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.westly.ludo.game.HandTarget
 import com.westly.ludo.game.LudoColor
 import com.westly.ludo.game.LudoGame
 import com.westly.ludo.game.Phase
 import com.westly.ludo.game.Piece
 import com.westly.ludo.game.TOverlay
+import com.westly.ludo.game.VisualEvent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +60,9 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
 
     private val manager = ConnectManager(context.applicationContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    /** The pointing hand of the other players (Phase 3). The game screen draws [RemoteHandPlayer.current]. */
+    val hand = RemoteHandPlayer(scope)
 
     init {
         manager.listener = this
@@ -275,6 +281,40 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     private var lastSeq = 0
     private var appliedGameNo = 0
 
+    // ----- Phase 3 working state -----
+
+    /** Host: when the last few "ev" messages went out (to keep them under about ten a second). */
+    private val evTimes = ArrayDeque<Long>()
+
+    /** One animation a guest has been told to play. [seq] is the snapshot that follows it. */
+    private class Anim(
+        val kind: String,
+        val seq: Int,
+        val v1: Int = 0,
+        val v2: Int = 0,
+        val color: String = "",
+        val slot: Int = 0,
+        val durationMs: Long = 0L,
+        val rank: Int = -1,
+        val moverColor: String = "",
+        val moverSlot: Int = -1
+    )
+
+    /** Guest: animations waiting to play, the first one being the one playing now. */
+    private val anims = ArrayDeque<Anim>()
+    private var animJob: Job? = null
+    private var safetyJob: Job? = null
+
+    /** Guest: roughly when the queued animations should all be over (SystemClock.elapsedRealtime). */
+    private var busyUntil = 0L
+
+    /** Guest: the newest snapshot that arrived while an animation was still to play. */
+    private var pendingSnapshot: JSONObject? = null
+    private var pendingSeq = 0
+
+    /** Guest: an animation has run and no snapshot has been applied since (the display still shows its leftovers). */
+    private var visualsDirty = false
+
     /** Bumped on every reset; late answers from an earlier attempt are ignored. */
     private var generation = 0
 
@@ -366,6 +406,8 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     private fun beginGame() {
         val order = drawAssignment(playerCount)
         val engine = LudoGame(tournament = order.size >= 3, connectActive = order)
+        engine.visualSink = { e -> onEngineEvent(e) }
+        resetLive()
         for (seat in order.indices) engine.scores[order[seat]] = seatScores[seat]
         playerOfSeat.clear()
         playerOfSeat.addAll(order)
@@ -500,15 +542,39 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         val myTurn = !g.bannerPending && g.overlay == TOverlay.NONE && g.activePlayer == player
         when (req.kind) {
             ConnectProtocol.K_ROLL ->
-                if (myTurn && g.phase == Phase.AwaitRoll) g.roll()
+                if (myTurn && g.phase == Phase.AwaitRoll) {
+                    announceHand(req.seat, player, HandTarget.Dice, g.firstColorOf(player), true)
+                    g.roll()
+                }
             ConnectProtocol.K_SELECT_DIE ->
-                if (myTurn && g.phase == Phase.Choose && req.i in 0..2) g.selectDie(req.i)
+                if (myTurn && g.phase == Phase.Choose && req.i in 0..2) {
+                    if (g.optionUsable(req.i)) {
+                        announceHand(req.seat, player, HandTarget.Orb(req.i), g.firstColorOf(player), false)
+                    }
+                    g.selectDie(req.i)
+                }
             ConnectProtocol.K_BOARD_TAP ->
-                if (myTurn && (g.phase == Phase.AwaitRoll || g.phase == Phase.Choose)) g.onBoardTap(req.row, req.col)
+                if (myTurn && (g.phase == Phase.AwaitRoll || g.phase == Phase.Choose)) {
+                    if (g.phase == Phase.AwaitRoll) {
+                        if (req.row in 6f..9f && req.col in 6f..9f) {
+                            announceHand(req.seat, player, HandTarget.Dice, g.firstColorOf(player), true)
+                        }
+                    } else {
+                        val hit = g.boardTapPiece(req.row, req.col)
+                        if (hit != null) announceHand(req.seat, player, g.handSpotOf(hit), hit.color, true)
+                    }
+                    g.onBoardTap(req.row, req.col)
+                }
             ConnectProtocol.K_PICK_PIECE ->
                 if (myTurn && (g.phase == Phase.Choose || g.phase == Phase.CaptureChoose)) {
                     val piece = g.pieces.firstOrNull { it.color.name == req.color && it.slot == req.slot }
-                    if (piece != null) g.onPiecePicked(piece)
+                    if (piece != null) {
+                        val spot = g.pickSpotOf(piece)
+                        if (spot != null) {
+                            announceHand(req.seat, player, spot, g.captureMoverColor() ?: piece.color, true)
+                        }
+                        g.onPiecePicked(piece)
+                    }
                 }
             ConnectProtocol.K_TIE_ROLL ->
                 if (g.overlay == TOverlay.TIEBREAK && g.tieTurn == player) g.tieHumanRoll()
@@ -518,6 +584,67 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
                 if (req.seat == 0 && g.phase == Phase.GameOver) newGameFromHost()
             else -> Unit
         }
+    }
+
+    // ----- Phase 3: live view, host side -----
+
+    /** Sends one "ev" to every seated phone. Hand events (cosmetic, droppable) are skipped when too many went out. */
+    private fun sendEv(message: JSONObject, droppable: Boolean) {
+        if (role != ConnectRole.HOST || !started) return
+        val now = SystemClock.elapsedRealtime()
+        while (evTimes.isNotEmpty() && now - evTimes.first() > 1000L) evTimes.removeFirst()
+        if (droppable && evTimes.size >= MAX_EV_PER_SECOND) return
+        evTimes.addLast(now)
+        if (seatByEndpoint.isEmpty()) return
+        manager.send(seatByEndpoint.keys.toList(), message)
+    }
+
+    /**
+     * The host's rules are about to animate something: tell everybody, at the moment it starts. The "seq" is
+     * the number the next snapshot will have, so a phone knows which snapshot to hold back until it has played it.
+     */
+    private fun onEngineEvent(e: VisualEvent) {
+        if (role != ConnectRole.HOST || !started) return
+        val next = seq + 1
+        val message = when (e) {
+            is VisualEvent.Roll -> ConnectProtocol.evRoll(next, e.player, e.a, e.b)
+            is VisualEvent.Move -> ConnectProtocol.evMove(
+                next, e.piece.color.name, e.piece.slot, e.from, e.to, e.durationMs, e.rank
+            )
+            is VisualEvent.Capture -> ConnectProtocol.evCapture(
+                next, e.victim.color.name, e.victim.slot, e.mover.color.name, e.mover.slot
+            )
+            is VisualEvent.TieRoll -> ConnectProtocol.evTieRoll(next, e.player, e.value)
+        }
+        sendEv(message, false)
+    }
+
+    /**
+     * Tells everybody where [player]'s hand goes, just before the host carries out that (already checked) tap.
+     * The host shows the hand of a guest's tap itself; its own taps get no hand on its own screen. The
+     * host never waits for it unless [HOST_LEAD_FOR_GUESTS_MS] is raised above 0.
+     */
+    private suspend fun announceHand(seat: Int, player: Int, target: HandTarget, color: LudoColor, animated: Boolean) {
+        sendEv(ConnectProtocol.evHand(seq + 1, player, color.name, target), true)
+        if (seat != 0) {
+            hand.add(target, color)
+            if (animated && HOST_LEAD_FOR_GUESTS_MS > 0L) delay(HOST_LEAD_FOR_GUESTS_MS)
+        }
+    }
+
+    /** Forgets everything about animations and hands in progress (a new game, or the end of the session). */
+    private fun resetLive() {
+        animJob?.cancel()
+        animJob = null
+        safetyJob?.cancel()
+        safetyJob = null
+        anims.clear()
+        pendingSnapshot = null
+        pendingSeq = 0
+        busyUntil = 0L
+        visualsDirty = false
+        evTimes.clear()
+        hand.clear()
     }
 
     /** Hides the "Try again" / "OK" notices. */
@@ -551,6 +678,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     private fun teardown() {
         generation++
         scope.coroutineContext.cancelChildren()
+        resetLive()
         helloTimers.clear()
         guestTimer = null
         manager.stopAll()
@@ -787,6 +915,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
             }
             ConnectProtocol.T_START -> guestStart(msg)
             ConnectProtocol.T_STATE -> guestState(msg)
+            ConnectProtocol.T_EV -> guestEvent(msg)
             ConnectProtocol.T_REJECT -> failJoin(rejectMessage(msg.optString("reason", "")))
             ConnectProtocol.T_BYE -> {
                 val message = if (inGame) MSG_GAME_ENDED else MSG_HOST_GONE
@@ -819,6 +948,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         playerOfSeat.clear()
         for (p in order) playerOfSeat.add(p)
         gameNo = no
+        resetLive()
         game = LudoGame(tournament = n >= 3, connectActive = order.toList())
         inGame = true
         // The first state normally follows at once; if it never comes, ask for it.
@@ -837,17 +967,193 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
 
     /** A snapshot from the host. Older ones and ones of another game are dropped; a damaged one is ignored. */
     private fun guestState(msg: JSONObject) {
-        val g = game ?: return
+        if (game == null) return
         val s = msg.optInt("seq", -1)
         if (s <= lastSeq || msg.optInt("gameNo", -1) != gameNo) return
         val snapshot = msg.optJSONObject("game") ?: return
+        val head = anims.firstOrNull()
+        if (head != null && s >= head.seq) {
+            // An animation that comes before this snapshot has still to play: keep only the newest one for later.
+            if (pendingSnapshot == null || s > pendingSeq) {
+                pendingSnapshot = snapshot
+                pendingSeq = s
+            }
+            return
+        }
+        applyGuestSnapshot(snapshot, s)
+    }
+
+    /**
+     * Puts a snapshot on screen: copies the values, drops the leftovers of any animation, and plays the
+     * round-win jingle once when the snapshot is the one that ends a round or the game.
+     */
+    private fun applyGuestSnapshot(snapshot: JSONObject, s: Int) {
+        val g = game ?: return
+        val first = lastSeq == 0
+        val before = g.phase
         try {
             g.applyMirror(snapshot)
         } catch (e: Exception) {
             return
         }
+        if (anims.isEmpty()) {
+            // Nothing is playing: the animations' leftovers (a seed standing at its goal, dice faces) give way to the real board.
+            g.clearVisuals()
+            visualsDirty = false
+        }
         lastSeq = s
         appliedGameNo = gameNo
+        val ends = g.phase == Phase.GameOver || g.phase == Phase.RoundBreak
+        val wasEnd = before == Phase.GameOver || before == Phase.RoundBreak
+        if (ends && !wasEnd && !first) g.playJingle()
+    }
+
+    // ----- Phase 3: live view, guest side -----
+
+    /**
+     * A live event from the host: either a hand to show, or an animation to play. Events are cosmetic: a
+     * damaged, late or lost one changes nothing, because the next snapshot always puts the board right.
+     */
+    private fun guestEvent(msg: JSONObject) {
+        val g = game ?: return
+        if (!inGame) return
+        val kind = msg.optString("k", "")
+        if (kind == ConnectProtocol.EV_HAND) {
+            val player = msg.optInt("player", -1)
+            if (player !in 0..3 || player == myPlayer) return   // the person's own hand is their finger
+            val target = ConnectProtocol.handTargetFromJson(msg.optJSONObject("target")) ?: return
+            val color = ConnectProtocol.colorFromName(msg.optString("color", "")) ?: return
+            hand.add(target, color)
+            return
+        }
+        if (uiScope == null) return   // no screen to animate on: the snapshots alone will do
+        val evSeq = msg.optInt("seq", -1)
+        if (evSeq <= lastSeq) return  // the snapshot that follows it is already on screen: too late to show it
+        val anim: Anim = when (kind) {
+            ConnectProtocol.EV_ROLL -> {
+                val a = msg.optInt("a", 0)
+                val b = msg.optInt("b", 0)
+                if (a !in 1..6 || b !in 1..6) return
+                Anim(kind, evSeq, v1 = a, v2 = b)
+            }
+            ConnectProtocol.EV_MOVE -> {
+                val color = msg.optString("color", "")
+                val slot = msg.optInt("slot", -1)
+                val from = msg.optInt("from", -99)
+                val to = msg.optInt("to", -99)
+                val ms = msg.optLong("durationMs", -1L)
+                if (g.pieceByName(color, slot) == null) return
+                if (from !in -1..55 || to !in 0..56 || to < from || ms !in 8L..8000L) return
+                Anim(kind, evSeq, v1 = from, v2 = to, color = color, slot = slot, durationMs = ms,
+                    rank = msg.optInt("rank", -1))
+            }
+            ConnectProtocol.EV_CAPTURE -> {
+                val color = msg.optString("color", "")
+                val slot = msg.optInt("slot", -1)
+                if (g.pieceByName(color, slot) == null) return
+                Anim(kind, evSeq, color = color, slot = slot,
+                    moverColor = msg.optString("mColor", ""), moverSlot = msg.optInt("mSlot", -1))
+            }
+            ConnectProtocol.EV_TIE_ROLL -> {
+                val player = msg.optInt("player", -1)
+                val value = msg.optInt("value", 0)
+                if (player !in 0..3 || value !in 1..6) return
+                Anim(kind, evSeq, v1 = player, v2 = value)
+            }
+            else -> return   // unknown kind: ignore
+        }
+        anims.addLast(anim)
+        busyUntil = maxOf(busyUntil, SystemClock.elapsedRealtime()) + HAND_LEAD_MS + expectedMs(anim)
+        armSafety()
+        runAnims()
+    }
+
+    /** About how long an animation takes, used only to size the safety timer. */
+    private fun expectedMs(a: Anim): Long = when (a.kind) {
+        ConnectProtocol.EV_MOVE -> a.durationMs + 300L
+        ConnectProtocol.EV_CAPTURE -> 600L
+        else -> 700L
+    }
+
+    /**
+     * How long to wait before an animation starts, so the hand of the person who acted gets there first.
+     * The person who acted never sees a hand, so for them the last hand is old and there is no wait.
+     */
+    private fun leadMs(a: Anim): Long {
+        if (a.kind == ConnectProtocol.EV_TIE_ROLL) return 0L
+        val at = hand.lastQueuedAt
+        if (at == 0L) return 0L
+        val waited = SystemClock.elapsedRealtime() - at
+        return (HAND_LEAD_MS - waited).coerceIn(0L, HAND_LEAD_MS)
+    }
+
+    /** Plays the queued animations one after the other on the screen's scope (it has the frame clock). */
+    private fun runAnims() {
+        if (animJob?.isActive == true) return
+        val ui = uiScope ?: return
+        val gen = generation
+        animJob = ui.launch {
+            while (gen == generation && anims.isNotEmpty()) {
+                val a = anims.first()
+                val g = game ?: break
+                val wait = leadMs(a)
+                if (wait > 0L) delay(wait)
+                if (gen != generation) return@launch
+                playAnim(g, a)
+                visualsDirty = true
+                anims.removeFirstOrNull()
+            }
+            if (gen == generation) animationsDone()
+        }
+    }
+
+    private suspend fun playAnim(g: LudoGame, a: Anim) {
+        when (a.kind) {
+            ConnectProtocol.EV_ROLL -> g.observeRoll(a.v1, a.v2)
+            ConnectProtocol.EV_MOVE -> {
+                val piece = g.pieceByName(a.color, a.slot)
+                if (piece != null) g.observeMove(piece, a.v1, a.v2, a.durationMs, a.rank)
+            }
+            ConnectProtocol.EV_CAPTURE -> {
+                val victim = g.pieceByName(a.color, a.slot)
+                if (victim != null) g.observeCapture(victim, g.pieceByName(a.moverColor, a.moverSlot))
+            }
+            ConnectProtocol.EV_TIE_ROLL -> g.observeTieRoll(a.v1, a.v2)
+            else -> Unit
+        }
+    }
+
+    /** Every queued animation has played: show the snapshot that was held back for them. */
+    private fun animationsDone() {
+        val snap = pendingSnapshot ?: return   // not here yet: it will be applied the moment it arrives
+        pendingSnapshot = null
+        applyGuestSnapshot(snap, pendingSeq)
+    }
+
+    /**
+     * Safety net: if the animations are not over well after they should have been (for example the screen
+     * stopped drawing), or no snapshot comes after them, stop waiting. Held snapshots are applied at once;
+     * otherwise the host is asked for a fresh one. A lost event can therefore never freeze this phone.
+     */
+    private fun armSafety() {
+        safetyJob?.cancel()
+        val g = generation
+        val wait = (busyUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L) + SAFETY_MS
+        safetyJob = scope.launch {
+            delay(wait)
+            if (g != generation || role != ConnectRole.GUEST) return@launch
+            if (anims.isEmpty() && pendingSnapshot == null && !visualsDirty) return@launch
+            animJob?.cancel()
+            animJob = null
+            anims.clear()
+            val snap = pendingSnapshot
+            if (snap != null) {
+                pendingSnapshot = null
+                applyGuestSnapshot(snap, pendingSeq)
+            } else {
+                hostEndpoint?.let { manager.send(it, ConnectProtocol.resync()) }
+            }
+        }
     }
 
     private fun setRoster(list: List<RosterEntry>) {
@@ -921,6 +1227,22 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         private const val RESYNC_WAIT_MS = 2_000L
         private const val MAX_RESYNC_TRIES = 3
         private const val MAX_QUEUE = 40
+
+        /** Phase 3: other phones wait this long after a hand arrives before they start the animation, so the hand gets there first. */
+        const val HAND_LEAD_MS = 600L
+
+        /** Phase 3: how long a phone waits beyond the expected end of the animations before it stops waiting. */
+        private const val SAFETY_MS = 3_000L
+
+        /** Phase 3: at most this many "ev" messages a second (hand events are skipped beyond it). */
+        private const val MAX_EV_PER_SECOND = 10
+
+        /**
+         * Phase 3: the host's own screen shows a guest's hand, but the host's rules run at once, so there the hand
+         * and the animation start together. Raise this (in milliseconds) to make the host wait for the hand;
+         * the guest who tapped then waits just as long. 0 keeps every tap instant.
+         */
+        private const val HOST_LEAD_FOR_GUESTS_MS = 0L
 
         /** Tournament-style engine players 0..3 = red, green, yellow, blue. */
         private val TOURNAMENT_COLORS = listOf(LudoColor.RED, LudoColor.GREEN, LudoColor.YELLOW, LudoColor.BLUE)

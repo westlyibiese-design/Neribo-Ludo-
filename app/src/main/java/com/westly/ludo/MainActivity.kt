@@ -36,6 +36,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -627,20 +628,23 @@ fun LudoScreen(
             // Computer hand: driven by the computer's real, already-decided action (never on the human's turn).
             val colTop = (maxHeight - (boardSide + u * fixedU)) / 2f
             val boardTop = colTop + u * topH
-            HandGuide(
-                target = game.handTarget(),
-                owner = game.handColor(),
-                screenW = maxWidth,
-                boardLeft = (maxWidth - boardSide) / 2f,
-                boardTop = boardTop,
-                boardSide = boardSide,
-                orbCenterY = boardTop + boardSide + u * 2.5f + u * 6.6f,
-                orbX = { option ->
-                    val slot = when (option) { 0 -> 0; 2 -> 1; else -> 2 }
-                    (maxWidth - u * 47.6f) / 2f + u * 6.6f + u * 17.2f * slot
-                },
-                u = u
-            )
+            // Connect and Play: the hand shown is the one of the OTHER players (the person who acts sees their own finger).
+            key(cs?.hand?.epoch ?: 0) {
+                HandGuide(
+                    target = if (cs != null) cs.hand.current?.target else game.handTarget(),
+                    owner = if (cs != null) cs.hand.owner else game.handColor(),
+                    screenW = maxWidth,
+                    boardLeft = (maxWidth - boardSide) / 2f,
+                    boardTop = boardTop,
+                    boardSide = boardSide,
+                    orbCenterY = boardTop + boardSide + u * 2.5f + u * 6.6f,
+                    orbX = { option ->
+                        val slot = when (option) { 0 -> 0; 2 -> 1; else -> 2 }
+                        (maxWidth - u * 47.6f) / 2f + u * 6.6f + u * 17.2f * slot
+                    },
+                    u = u
+                )
+            }
 
             // Connect: a phone dropped, so the game waits for that person.
             val waitName = cs?.waitingForName

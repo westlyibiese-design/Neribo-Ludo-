@@ -194,6 +194,18 @@ class LudoGame(
 
     private var movingPiece by mutableStateOf<Piece?>(null)
     private var moveProgress by mutableFloatStateOf(0f)
+
+    /** DISPLAY ONLY: the rest spot rank used while the moving seed is drawn (it only matters on the last hop into the centre). */
+    private var moveRank by mutableIntStateOf(-1)
+
+    /** DISPLAY ONLY (Connect observers): a seed that is not drawn for a moment, such as the capturing seed that is banked. */
+    private var hiddenPiece by mutableStateOf<Piece?>(null)
+
+    /**
+     * Connect and Play, host only: told at the moment an animation starts, so the host can tell the other
+     * phones to play the same one. Null in every other mode, where nothing changes.
+     */
+    var visualSink: ((VisualEvent) -> Unit)? = null
     private var movedThisRoll = false
     private var moveTo = 0
 
@@ -382,6 +394,103 @@ class LudoGame(
     private fun spotOf(piece: Piece): HandTarget.Spot {
         val (r, c) = Route.anchor(piece.color, piece.slot, piece.finishRank, piece.progress)
         return HandTarget.Spot(r, c)
+    }
+
+    // ------------------------------------------------------------------
+    // Connect and Play, live view: what the host needs to tell the other phones where a hand goes.
+    // These only READ the game; they never change it.
+    // ------------------------------------------------------------------
+
+    /** The colour whose side the hand of [player] enters from for the dice and the movement circles. */
+    fun firstColorOf(player: Int): LudoColor = colorsOf(player.coerceIn(0, 3)).first()
+
+    /** The board spot of [piece] as the hand points at it. */
+    fun handSpotOf(piece: Piece): HandTarget.Spot = spotOf(piece)
+
+    /** The seed that is waiting for a capture choice (its colour is the side the hand comes from), or null. */
+    fun captureMoverColor(): LudoColor? = if (phase == Phase.CaptureChoose) pendingMover?.color else null
+
+    /** The seed with this colour name and slot, or null. */
+    fun pieceByName(color: String, slot: Int): Piece? =
+        pieces.firstOrNull { it.color.name == color && it.slot == slot }
+
+    /**
+     * The seed a tap at ([row], [col]) would choose right now, judged exactly as [onBoardTap] judges it
+     * (a movement circle must be selected and the seed must glow). Null when the tap would choose nothing.
+     */
+    fun boardTapPiece(row: Float, col: Float): Piece? {
+        if (phase != Phase.Choose || selectedDie !in 0..2) return null
+        return hitView(row, col)?.tag as? Piece
+    }
+
+    /** Where the hand goes when [piece] is picked in the pop-up (own seed to move, or opponent seed to capture); null if not allowed now. */
+    fun pickSpotOf(piece: Piece): HandTarget.Spot? = when (phase) {
+        Phase.CaptureChoose -> if (pick?.items?.any { it.tag === piece } == true) spotOf(piece) else null
+        Phase.Choose -> if (isGlowing(piece)) spotOf(piece) else null
+        else -> null
+    }
+
+    /** The glowing seed nearest to a tap, if one is close enough. */
+    private fun hitView(row: Float, col: Float): PieceView? {
+        val views = pieceViews().filter { it.glow }
+        var best: PieceView? = null
+        var bestDist = 1.15f
+        for (v in views) {
+            val dr = v.row - row
+            val dc = v.col - col
+            val dist = sqrt(dr * dr + dc * dc)
+            if (dist < bestDist) {
+                bestDist = dist
+                best = v
+            }
+        }
+        return best
+    }
+
+    // ------------------------------------------------------------------
+    // Connect and Play, live view: the visual routines.
+    // The host runs them inside the real rules (same timing, same sounds as always). An observer runs the
+    // same routines from the host's events. They change DISPLAY fields only (dice faces, the moving or
+    // returning seed, the tie-break flicker): never scores, turns or where seeds really stand.
+    // The next snapshot from the host puts everything right, see [clearVisuals].
+    // ------------------------------------------------------------------
+
+    /** Observer: forget every display-only leftover. Called right after a snapshot has been applied. */
+    fun clearVisuals() {
+        movingPiece = null
+        returning = null
+        hiddenPiece = null
+    }
+
+    /** Observer: plays a dice roll that lands on [a] and [b]. */
+    suspend fun observeRoll(a: Int, b: Int) {
+        playRollVisual(a, b)
+    }
+
+    /** Observer: walks [piece] from [from] to [to] and leaves it standing there until the snapshot arrives. */
+    suspend fun observeMove(piece: Piece, from: Int, to: Int, durationMs: Long, rank: Int) {
+        returning = null
+        hiddenPiece = null
+        playMoveVisual(piece, from, to, durationMs.toFloat(), rank)
+    }
+
+    /** Observer: the capturing seed disappears and [victim] travels home; it rests there until the snapshot arrives. */
+    suspend fun observeCapture(victim: Piece, mover: Piece?) {
+        movingPiece = null
+        hiddenPiece = mover
+        val (vr, vc) = Route.anchor(victim.color, victim.slot, victim.finishRank, victim.progress)
+        playCaptureVisual(victim, vr, vc, false)
+    }
+
+    /** Observer: plays the tie-break dice for [player] and leaves the result showing until the snapshot arrives. */
+    suspend fun observeTieRoll(player: Int, value: Int) {
+        tieRolling = player
+        playTieVisual(value)
+    }
+
+    /** The round-win jingle, for observers (the host plays it itself while it runs the rules). */
+    fun playJingle() {
+        sounds.win()
     }
 
     /** The yard color whose side the computer's hand comes from right now. */
@@ -1170,18 +1279,24 @@ class LudoGame(
     private suspend fun rollTieDie(p: Int) {
         tieRolling = p
         try {
-            sounds.roll()
-            repeat(8) {
-                tieFlicker = Random.nextInt(1, 7)
-                delay((60 * fastMul).toLong())
-            }
             val v = Random.nextInt(1, 7)
-            tieFlicker = v
-            sounds.dieLand()
+            visualSink?.invoke(VisualEvent.TieRoll(p, v))
+            playTieVisual(v)
             if (overlay == TOverlay.TIEBREAK && p in tieIds) tieRolls[p] = v
         } finally {
             tieRolling = -1
         }
+    }
+
+    /** The tie-break die flickers, then shows [v]. Visual only. */
+    private suspend fun playTieVisual(v: Int) {
+        sounds.roll()
+        repeat(8) {
+            tieFlicker = Random.nextInt(1, 7)
+            delay((60 * fastMul).toLong())
+        }
+        tieFlicker = v
+        sounds.dieLand()
     }
 
     /**
@@ -1223,17 +1338,10 @@ class LudoGame(
     suspend fun roll() {
         if (phase != Phase.AwaitRoll) return
         phase = Phase.Rolling
-        repeat(9) { i ->
-            face1 = Random.nextInt(1, 7)
-            face2 = Random.nextInt(1, 7)
-            if (i == 0) sounds.roll()   // one recorded roll sound for the whole roll
-            delay((60 * fastMul).toLong())
-        }
         val a = Random.nextInt(1, 7)
         val b = Random.nextInt(1, 7)
-        face1 = a
-        face2 = b
-        sounds.dieLand()
+        visualSink?.invoke(VisualEvent.Roll(activePlayer, a, b))
+        playRollVisual(a, b)
         die1 = a
         die2 = b
         used1 = false
@@ -1241,6 +1349,19 @@ class LudoGame(
         selectedDie = -1
         movedThisRoll = false
         afterDiceChange()
+    }
+
+    /** The dice flicker, then land on [a] and [b]. Visual only. */
+    private suspend fun playRollVisual(a: Int, b: Int) {
+        repeat(9) { i ->
+            face1 = Random.nextInt(1, 7)
+            face2 = Random.nextInt(1, 7)
+            if (i == 0) sounds.roll()   // one recorded roll sound for the whole roll
+            delay((60 * fastMul).toLong())
+        }
+        face1 = a
+        face2 = b
+        sounds.dieLand()
     }
 
     private suspend fun afterDiceChange() {
@@ -1400,11 +1521,20 @@ class LudoGame(
 
     private suspend fun capture(mover: Piece, victim: Piece) {
         val (vr, vc) = Route.anchor(victim.color, victim.slot, victim.finishRank, victim.progress)
+        visualSink?.invoke(VisualEvent.Capture(victim, mover))
+        applyCapture(mover, victim)
+        playCaptureVisual(victim, vr, vc, true)
+    }
+
+    /**
+     * The captured seed travels from ([vr], [vc]) back to its house. Visual only. The host lets the seed
+     * go ([clearEnd] = true); an observer keeps it in its house until the snapshot arrives.
+     */
+    private suspend fun playCaptureVisual(victim: Piece, vr: Float, vc: Float, clearEnd: Boolean) {
         returning = victim
         retRow = vr
         retCol = vc
         retT = 0f
-        applyCapture(mover, victim)
         sounds.land()   // also a short buzz (see Sounds.land)
         val start = withFrameNanos { it }
         while (true) {
@@ -1413,17 +1543,29 @@ class LudoGame(
             if (t >= 1f) break
             retT = t
         }
-        returning = null
+        if (clearEnd) {
+            returning = null
+        } else {
+            retT = 1f
+        }
     }
 
     private suspend fun animateMove(piece: Piece, from: Int, to: Int) {
-        movingPiece = piece
-        moveProgress = from.toFloat()
         val steps = to - from
         val duration = maxOf(
             8f,
             (if (from == Route.IN_HOUSE) 400f + to * 170f else steps * (if (steps > 6) 150f else 190f)) * fastMul
         )
+        visualSink?.invoke(VisualEvent.Move(piece, from, to, duration.toLong(), piece.finishRank))
+        playMoveVisual(piece, from, to, duration, piece.finishRank)
+    }
+
+    /** The seed walks from [from] to [to] in [duration] ms with its sounds. Visual only. */
+    private suspend fun playMoveVisual(piece: Piece, from: Int, to: Int, duration: Float, rank: Int) {
+        movingPiece = piece
+        moveRank = rank
+        moveProgress = from.toFloat()
+        val steps = to - from
         if (from == Route.IN_HOUSE) sounds.out()
         var lastCell = from
         val startNanos = withFrameNanos { it }
@@ -1460,18 +1602,7 @@ class LudoGame(
                 pick = null
                 if (selectedDie !in 0..2) return
                 val views = pieceViews().filter { it.glow }
-                var best: PieceView? = null
-                var bestDist = 1.15f
-                for (v in views) {
-                    val dr = v.row - row
-                    val dc = v.col - col
-                    val dist = sqrt(dr * dr + dc * dc)
-                    if (dist < bestDist) {
-                        bestDist = dist
-                        best = v
-                    }
-                }
-                val hit = best ?: return
+                val hit = hitView(row, col) ?: return
                 // Every movable piece standing on the tapped spot (house seeds each have their own spot).
                 val here = if (hit.group >= 0) views.filter { it.group == hit.group } else listOf(hit)
                 if (here.size <= 1) {
@@ -1507,7 +1638,7 @@ class LudoGame(
         val groups = HashMap<Int, MutableList<Piece>>()
 
         for (p in pieces) {
-            if (p === moving || p === returning) continue
+            if (p === moving || p === returning || p === hiddenPiece) continue
             if (isOut(p.color)) continue   // a knocked-out player's seeds are not drawn
             val pr = p.progress
             when {
@@ -1565,8 +1696,8 @@ class LudoGame(
             val f = moveProgress
             val a = floor(f).toInt()
             val t = f - a
-            val (r0, c0) = Route.anchor(moving.color, moving.slot, moving.finishRank, a)
-            val (r1, c1) = Route.anchor(moving.color, moving.slot, moving.finishRank, minOf(a + 1, Route.CENTER))
+            val (r0, c0) = Route.anchor(moving.color, moving.slot, moveRank, a)
+            val (r1, c1) = Route.anchor(moving.color, moving.slot, moveRank, minOf(a + 1, Route.CENTER))
             val rad = when {
                 f < 0f -> lerp(HOUSE_R, BOARD_R, f + 1f)
                 f > 55f -> lerp(BOARD_R, FINISH_R, f - 55f)
@@ -1611,6 +1742,24 @@ class LudoGame(
         const val BOARD_R = 0.42f
         const val FINISH_R = 0.14f
     }
+}
+
+/**
+ * Connect and Play, host only: what the host's rules are about to animate. The host sends each one to the
+ * other phones at the moment the animation starts, so they can play the same one.
+ */
+sealed class VisualEvent {
+    /** The dice of [player] are rolling and will land on [a] and [b]. */
+    class Roll(val player: Int, val a: Int, val b: Int) : VisualEvent()
+
+    /** [piece] walks from progress [from] to [to] in [durationMs]; [rank] is its rest spot if it reaches the centre. */
+    class Move(val piece: Piece, val from: Int, val to: Int, val durationMs: Long, val rank: Int) : VisualEvent()
+
+    /** [victim] is sent home by [mover]. */
+    class Capture(val victim: Piece, val mover: Piece) : VisualEvent()
+
+    /** [player] rolls the tie-break die and gets [value]. */
+    class TieRoll(val player: Int, val value: Int) : VisualEvent()
 }
 
 /** One legal action: use movement option [option] (0 = blue, 1 = green, 2 = red total) on [piece]. */
