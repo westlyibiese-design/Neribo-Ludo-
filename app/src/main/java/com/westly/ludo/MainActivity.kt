@@ -51,6 +51,7 @@ import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.westly.ludo.connect.ConnectSession
+import com.westly.ludo.game.LudoColor
 import com.westly.ludo.game.LudoGame
 import com.westly.ludo.game.GameSettings
 import com.westly.ludo.game.Phase
@@ -61,6 +62,8 @@ import com.westly.ludo.ui.BoardThemes
 import com.westly.ludo.ui.ChangeNamesDialog
 import com.westly.ludo.ui.ConfigurationScreen
 import com.westly.ludo.ui.ConnectCountScreen
+import com.westly.ludo.ui.ConnectMenuDialog
+import com.westly.ludo.ui.ConnectNotice
 import com.westly.ludo.ui.ConnectHostScreen
 import com.westly.ludo.ui.ConnectJoinScreen
 import com.westly.ludo.ui.ConnectMenuScreen
@@ -74,6 +77,8 @@ import com.westly.ludo.ui.GameModeScreen
 import com.westly.ludo.ui.HandGuide
 import com.westly.ludo.ui.FooterSpace
 import com.westly.ludo.ui.HomeScreen
+import com.westly.ludo.ui.KeepScreenOn
+import com.westly.ludo.ui.YouAreLabel
 import com.westly.ludo.ui.MenuDialog
 import com.westly.ludo.ui.NeriboFooter
 import com.westly.ludo.ui.ResignDialog
@@ -199,9 +204,29 @@ fun LudoApp(
     // How many players the Connect and Play host picked.
     var connectCount by rememberSaveable { mutableStateOf(2) }
 
-    // Any screen other than the two lobby screens closes the nearby connection.
+    // The screen's coroutine scope has the frame clock the host needs to run move animations.
+    SideEffect { connect.bindScope(scope) }
+    // A line for the Offline screen, for example "The host ended the game." after a game was closed.
+    var connectNotice by remember { mutableStateOf<String?>(null) }
+
+    // Any screen other than the lobby screens and the Connect game closes the nearby connection.
     LaunchedEffect(screen) {
-        if (screen != "connect_host" && screen != "connect_join") connect.leave()
+        if (screen != "connect_host" && screen != "connect_join" && screen != "connect_game") connect.leave()
+    }
+    // The host pressed Start (a guest is told the game began): everybody opens the game screen.
+    LaunchedEffect(connect.inGame) {
+        if (connect.inGame && (screen == "connect_host" || screen == "connect_join")) screen = "connect_game"
+    }
+    // The game is over for this phone (the host ended it or the link dropped): back to the Offline screen.
+    LaunchedEffect(connect.inGame, connect.ended) {
+        if (screen == "connect_game" && !connect.inGame) {
+            val message = connect.ended
+            if (message != null) {
+                connectNotice = message
+                connect.clearNotices()
+            }
+            screen = "connect_offline"
+        }
     }
 
     BackHandler(enabled = screen != "intro" && screen != "home") {
@@ -209,6 +234,7 @@ fun LudoApp(
             "game", "tournament", "family", "family_count" -> "modes"
             "family_names" -> "family_count"
             "connect" -> "modes"
+            "connect_game" -> "connect_offline"
             "connect_offline" -> "connect"
             "connect_count", "connect_host", "connect_join" -> "connect_offline"
             "config", "sound", "rules" -> "settings"
@@ -244,9 +270,19 @@ fun LudoApp(
                     onOffline = { screen = "connect_offline" }
                 )
                 "connect_offline" -> ConnectOfflineScreen(
-                    onBack = { screen = "connect" },
-                    onHost = { screen = "connect_count" },
-                    onJoin = { screen = "connect_join" }
+                    onBack = {
+                        connectNotice = null
+                        screen = "connect"
+                    },
+                    onHost = {
+                        connectNotice = null
+                        screen = "connect_count"
+                    },
+                    onJoin = {
+                        connectNotice = null
+                        screen = "connect_join"
+                    },
+                    notice = connectNotice
                 )
                 "connect_count" -> ConnectCountScreen(
                     onBack = { screen = "connect_offline" },
@@ -263,6 +299,15 @@ fun LudoApp(
                     connect, names,
                     onClose = { screen = "connect_offline" }
                 )
+                "connect_game" -> connect.game?.let { cg ->
+                    KeepScreenOn()
+                    LudoScreen(
+                        cg, scope, names, settings,
+                        onModes = { screen = "connect_offline" },
+                        onHome = { screen = "connect_offline" },
+                        connect = connect
+                    )
+                }
                 "family_count" -> FamilyCountScreen(
                     onBack = { screen = "modes" },
                     onPick = { count ->
@@ -312,6 +357,20 @@ private fun turnText(game: LudoGame, nm: (Int) -> String): String = when {
     else -> "${nm(game.activePlayer)} Turn"
 }
 
+/** Connect and Play wording: every person has their own phone, so it is "Your Turn" or "<Name>'s Turn". */
+private fun connectTurnText(game: LudoGame, nm: (Int) -> String, me: Int): String = when {
+    game.phase == Phase.GameOver -> "${nm(game.winner.coerceAtLeast(0))} Wins!"
+    game.activePlayer == me -> "Your Turn"
+    else -> "${nm(game.activePlayer)}'s Turn"
+}
+
+private fun connectDotColor(c: LudoColor): Color = when (c) {
+    LudoColor.RED -> Palette.Red.base
+    LudoColor.GREEN -> Palette.Green.base
+    LudoColor.YELLOW -> Palette.Yellow.base
+    LudoColor.BLUE -> Palette.Blue.base
+}
+
 /**
  * The game screen around the board (Phase 2 layout, unchanged) wired to the Phase 3 game.
  * Every size is a multiple of `u`, which is 1% of the screen width, so the layout
@@ -325,13 +384,26 @@ fun LudoScreen(
     settings: GameSettings,
     onModes: () -> Unit,
     onHome: () -> Unit,
-    onEndFamily: () -> Unit = {}
+    onEndFamily: () -> Unit = {},
+    connect: ConnectSession? = null
 ) {
+    // Connect and Play: names come from the room, taps go to the session (host or guest), and a guest's
+    // game is only a display model. Every other mode passes null and behaves exactly as before.
+    val cs = connect
     val tournament = game.tournament
-    // Names shown on screen: Family has its own names, the other modes use the saved player names.
-    val nm: (Int) -> String = { i -> if (game.family) game.familyName(i) else names[i] }
-    val nameList: List<String> = if (game.family) game.familyNames.toList() else names.names.toList()
+    // Names shown on screen: Connect uses the room's names, Family its own, the other modes the saved player names.
+    val nm: (Int) -> String = { i ->
+        if (cs != null) cs.playerName(i) else if (game.family) game.familyName(i) else names[i]
+    }
+    val nameList: List<String> =
+        if (cs != null) List(4) { cs.playerName(it) }
+        else if (game.family) game.familyNames.toList()
+        else names.names.toList()
     val endLabel = if (tournament) "End Tournament" else "End Game"
+    val turnLine = if (cs != null) connectTurnText(game, nm, cs.myPlayer) else turnText(game, nm)
+    val wideTurn = game.family || cs != null
+    // Connect: a colour nobody plays (3-player game) has no badge.
+    val present: (Int) -> Boolean = { p -> cs == null || cs.seatOfPlayer(p) >= 0 }
 
     // Configuration: computer speed and level, and the board type pictures for the four houses.
     SideEffect {
@@ -366,9 +438,35 @@ fun LudoScreen(
 
     // Which pop-up is open: "none", "menu", "resign" or "names". Computers wait while one is open.
     var dialog by remember { mutableStateOf("none") }
+    // Leaving a Connect and Play game: the host ends it for everybody (after asking), a guest just leaves.
+    val exitAction: () -> Unit = {
+        if (cs == null) {
+            onModes()
+        } else if (cs.isHost) {
+            dialog = "connectHostExit"
+        } else {
+            cs.leave()
+            onModes()
+        }
+        Unit
+    }
+    if (cs != null) {
+        BackHandler(enabled = dialog == "none") { dialog = "connectMenu" }
+    }
     // Computers also wait while a Tournament overlay (Tie-Break / Round Result / You're Out) or the round banner is showing.
     val overlayOpen = tournament && game.overlay != TOverlay.NONE
-    val bannerOn = tournament && game.bannerPending
+    // A Connect guest runs no rules: it shows the banner by itself whenever the host's banner counter goes up.
+    var guestBanner by remember { mutableStateOf(false) }
+    if (cs != null && !cs.isHost && tournament) {
+        LaunchedEffect(game, game.bannerSeq) {
+            if (game.bannerSeq > 0) {
+                guestBanner = true
+                delay(1500)
+                guestBanner = false
+            }
+        }
+    }
+    val bannerOn = tournament && (if (cs != null && !cs.isHost) guestBanner else game.bannerPending)
     LaunchedEffect(dialog, overlayOpen, bannerOn) { game.paused = dialog != "none" || overlayOpen || bannerOn }
     LaunchedEffect(game.bannerPending) {
         if (tournament && game.bannerPending) {
@@ -390,7 +488,9 @@ fun LudoScreen(
             // The board takes the full screen width (or up to 70% of the height on short screens).
             // Everything around it is sized in `u` (1% of the screen width) and shrinks only if needed.
             // Tournament shows four score badges, so its bottom area is a little taller.
-            val fixedU = if (tournament) 58.7f else 54.5f
+            // Connect adds one line for "You are ..." between the buttons and the board.
+            val topH = if (cs != null) 32.5f else 27.5f
+            val fixedU = (if (tournament) 58.7f else 54.5f) + (topH - 27.5f)
             val maxBoard = minOf(maxWidth, maxHeight * 0.70f)
             val u = minOf(maxWidth / 100f, (maxHeight - maxBoard) / fixedU)
             val boardSide = minOf(maxBoard, maxHeight - u * fixedU)
@@ -400,15 +500,26 @@ fun LudoScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 // Top: menu button, exit button, then player names + scores
-                Box(Modifier.width(u * 100f).height(u * 27.5f)) {
+                Box(Modifier.width(u * 100f).height(u * topH)) {
                     MenuButton(
                         u * 11.8f,
-                        Modifier.align(Alignment.TopStart).padding(start = u * 1f, top = u * 1f).clickable { dialog = "menu" }
+                        Modifier.align(Alignment.TopStart).padding(start = u * 1f, top = u * 1f)
+                            .clickable { dialog = if (cs != null) "connectMenu" else "menu" }
                     )
                     ExitButton(
                         u * 11.8f,
-                        Modifier.align(Alignment.TopEnd).padding(end = u * 1f, top = u * 1f).clickable { onModes() }
+                        Modifier.align(Alignment.TopEnd).padding(end = u * 1f, top = u * 1f)
+                            .clickable { exitAction() }
                     )
+                    if (cs != null && cs.myColors.isNotEmpty()) {
+                        // Which colours are mine. Under the turn pill in Tournament-style games, at the top otherwise.
+                        Box(
+                            Modifier.align(Alignment.TopCenter)
+                                .padding(top = if (tournament) u * 12.4f else u * 3f)
+                        ) {
+                            YouAreLabel(cs.myColors.map { connectDotColor(it) }, cs.youAreText, u)
+                        }
+                    }
                     if (tournament && game.spectator && game.phase != Phase.GameOver) {
                         // The human is only watching: Skip makes the computers play fast.
                         SkipButton(
@@ -419,20 +530,20 @@ fun LudoScreen(
                     }
                     if (tournament) {
                         TurnPill(
-                            turnText(game, nm),
+                            turnLine,
                             u,
                             Modifier.align(Alignment.TopCenter).padding(top = u * 2f),
                             textScale = 0.75f,
-                            widthUnits = if (game.family) 66f else 41f,
-                            fitChars = if (game.family) 24 else 0
+                            widthUnits = if (wideTurn) 66f else 41f,
+                            fitChars = if (wideTurn) 24 else 0
                         )
-                        PlayerBadge(
+                        if (present(1)) PlayerBadge(
                             nm(1), game.scores[1], u,
                             Modifier.align(Alignment.BottomStart).padding(start = u * 12f)
                                 .alpha(if (game.activePlayer == 1) 1f else 0.5f),
                             Palette.Green.base
                         )
-                        PlayerBadge(
+                        if (present(2)) PlayerBadge(
                             nm(2), game.scores[2], u,
                             Modifier.align(Alignment.BottomEnd).padding(end = u * 11f)
                                 .alpha(if (game.activePlayer == 2) 1f else 0.5f),
@@ -461,8 +572,14 @@ fun LudoScreen(
                     pulse = { pulse.floatValue },
                     rollHint = game.phase == Phase.AwaitRoll,
                     pick = game.pick,
-                    onPick = { tag -> if (!game.isComputerTurn) scope.launch { game.onPiecePicked(tag) } },
-                    onBoardTap = { row, col -> if (!game.isComputerTurn && !game.bannerPending) scope.launch { game.onBoardTap(row, col) } },
+                    onPick = { tag ->
+                        if (cs != null) cs.tapPiece(tag)
+                        else if (!game.isComputerTurn) scope.launch { game.onPiecePicked(tag) }
+                    },
+                    onBoardTap = { row, col ->
+                        if (cs != null) cs.tapBoard(row, col)
+                        else if (!game.isComputerTurn && !game.bannerPending) scope.launch { game.onBoardTap(row, col) }
+                    },
                     yardLabels = if (tournament) listOf(nm(1), nm(2), nm(0), nm(3))
                     else listOf(nm(1), nm(0), nm(0), nm(1)),
                     yardImages = yardImages,
@@ -473,20 +590,22 @@ fun LudoScreen(
                 // Bottom: dice indicators (blue = first die, red = total, green = second die)
                 Spacer(Modifier.height(u * 2.5f))
                 Row(horizontalArrangement = Arrangement.spacedBy(u * 4f)) {
-                    MoveOrb(game, 0, game.die1, Palette.Blue, u)
-                    MoveOrb(game, 2, game.die1 + game.die2, Palette.Red, u)
-                    MoveOrb(game, 1, game.die2, Palette.Green, u)
+                    val orbTap: (Int) -> Unit = { i -> if (cs != null) cs.tapDie(i) else game.selectDie(i) }
+                    val orbOn = cs?.canAct() ?: true
+                    MoveOrb(game, 0, game.die1, Palette.Blue, u, orbOn, orbTap)
+                    MoveOrb(game, 2, game.die1 + game.die2, Palette.Red, u, orbOn, orbTap)
+                    MoveOrb(game, 1, game.die2, Palette.Green, u, orbOn, orbTap)
                 }
                 Spacer(Modifier.height(u * 2f))
                 if (tournament) {
                     Row(Modifier.width(u * 100f), horizontalArrangement = Arrangement.SpaceBetween) {
-                        PlayerBadge(
+                        if (present(0)) PlayerBadge(
                             nm(0), game.scores[0], u,
                             Modifier.padding(start = u * 12f).alpha(if (game.activePlayer == 0) 1f else 0.5f),
                             Palette.Red.base
-                        )
-                        // A 3-player Family game has no blue player.
-                        if (!game.family || game.familyPlayers > 3) {
+                        ) else Spacer(Modifier.width(u * 32f))
+                        // A 3-player Family game has no blue player; a 3-player Connect game lacks one colour.
+                        if ((!game.family || game.familyPlayers > 3) && present(3)) {
                             PlayerBadge(
                                 nm(3), game.scores[3], u,
                                 Modifier.padding(end = u * 11f).alpha(if (game.activePlayer == 3) 1f else 0.5f),
@@ -496,18 +615,18 @@ fun LudoScreen(
                     }
                 } else {
                     TurnPill(
-                        turnText(game, nm),
+                        turnLine,
                         u,
                         textScale = 0.75f,
-                        widthUnits = if (game.family) 66f else 41f,
-                        fitChars = if (game.family) 24 else 0
+                        widthUnits = if (wideTurn) 66f else 41f,
+                        fitChars = if (wideTurn) 24 else 0
                     )
                 }
             }
 
             // Computer hand: driven by the computer's real, already-decided action (never on the human's turn).
             val colTop = (maxHeight - (boardSide + u * fixedU)) / 2f
-            val boardTop = colTop + u * 27.5f
+            val boardTop = colTop + u * topH
             HandGuide(
                 target = game.handTarget(),
                 owner = game.handColor(),
@@ -522,6 +641,15 @@ fun LudoScreen(
                 },
                 u = u
             )
+
+            // Connect: a phone dropped, so the game waits for that person.
+            val waitName = cs?.waitingForName
+            if (waitName != null) {
+                ConnectNotice(
+                    "Waiting for $waitName to reconnect...", u,
+                    Modifier.align(Alignment.TopCenter).padding(top = boardTop + u * 1f)
+                )
+            }
 
             // Round banner: fades in and out over the board, takes no taps.
             if (bannerAlpha > 0.01f) {
@@ -595,14 +723,21 @@ fun LudoScreen(
                     rolling = game.tieRolling,
                     flicker = game.tieFlicker,
                     // Family: every tied person is a human and taps their own dice in turn.
-                    humanCanRoll = if (game.family) game.tieTurn >= 0
+                    // Connect: the same, but each person taps on their own phone, so only the one whose turn it is can.
+                    humanCanRoll = if (cs != null) game.tieTurn >= 0 && game.tieTurn == cs.myPlayer
+                    else if (game.family) game.tieTurn >= 0
                     else 0 in game.tieIds && game.tieRolls[0] == 0 && game.tieRolling < 0,
-                    onRoll = { scope.launch { game.tieHumanRoll() } },
-                    tapPlayer = if (game.family) game.tieTurn else 0,
-                    tapMessage = if (game.family && game.tieTurn >= 0) "${nm(game.tieTurn)}, tap your dice to roll" else null
+                    onRoll = { if (cs != null) cs.tapTie() else scope.launch { game.tieHumanRoll() } },
+                    tapPlayer = if (cs != null || game.family) game.tieTurn else 0,
+                    tapMessage = if (cs != null && game.tieTurn >= 0) "Tap your dice to roll"
+                    else if (game.family && game.tieTurn >= 0) "${nm(game.tieTurn)}, tap your dice to roll" else null,
+                    waitMessage = if (cs != null && game.tieTurn >= 0) "Waiting for ${nm(game.tieTurn)}..." else null
                 )
                 // The roll-off runs while this screen is open; leaving the screen stops it safely.
-                LaunchedEffect(Unit) { game.runTieBreak() }
+                // A Connect guest never runs it: only the host decides the roll-off.
+                if (cs == null || cs.isHost) {
+                    LaunchedEffect(Unit) { game.runTieBreak() }
+                }
             }
             TOverlay.RESULT -> RoundResultDialog(
                 title = "Round ${game.round} Result",
@@ -612,9 +747,13 @@ fun LudoScreen(
                 outPlayer = game.resultOut,
                 auto = game.spectator,
                 fast = game.fast,
-                onNext = { game.resultNext() }
+                onNext = { if (cs != null) cs.tapNextRound() else game.resultNext() },
+                // Connect: only the host moves on; a guest sees who it is waiting for.
+                nextEnabled = cs == null || cs.isHost,
+                nextLabel = if (cs == null || cs.isHost) "Next Round" else "Waiting for ${cs.hostName}..."
             )
-            TOverlay.OUT -> {
+            // Connect has no "You're out" screen: a knocked-out person keeps watching the game.
+            TOverlay.OUT -> if (cs == null) {
                 val to = if (game.leaveTo in 0..3) game.leaveTo else 1
                 YoureOutDialog(
                     message = (if (game.resultResigned) "You resigned.\n" else "You are out of the tournament.\n") +
@@ -627,19 +766,67 @@ fun LudoScreen(
     }
 
     if (over) {
-        WinnerPage(
-            winnerName = nm(game.winner.coerceAtLeast(0)),
-            names = nameList,
-            scores = game.scores.toList().let { sc ->
-                List(if (game.family) game.familyPlayers else PlayerNames.COUNT) { sc.getOrElse(it) { 0 } }
-            },
-            tournament = tournament,
-            onNext = { game.nextGame() },
-            onModes = {
-                game.nextGame()
-                onModes()
-            }
-        )
+        if (cs != null) {
+            // Connect: names and scores follow the people (by seat), because colours change every game.
+            val seats = (0 until cs.playerCount).toList()
+            WinnerPage(
+                winnerName = nm(game.winner.coerceAtLeast(0)),
+                names = seats.map { cs.seatName(it) },
+                scores = seats.map { cs.scoreOfSeat(it) },
+                tournament = tournament,
+                onNext = { cs.tapNextGame() },
+                onModes = { exitAction() },
+                nextEnabled = cs.isHost,
+                waitingText = if (cs.isHost) null else "Waiting for ${cs.hostName}..."
+            )
+        } else {
+            WinnerPage(
+                winnerName = nm(game.winner.coerceAtLeast(0)),
+                names = nameList,
+                scores = game.scores.toList().let { sc ->
+                    List(if (game.family) game.familyPlayers else PlayerNames.COUNT) { sc.getOrElse(it) { 0 } }
+                },
+                tournament = tournament,
+                onNext = { game.nextGame() },
+                onModes = {
+                    game.nextGame()
+                    onModes()
+                }
+            )
+        }
+    }
+
+    // Connect menus sit above the winner page so they can be opened from it too.
+    if (cs != null) {
+        when (dialog) {
+            "connectMenu" -> ConnectMenuDialog(
+                isHost = cs.isHost,
+                endLabel = endLabel,
+                onEnd = { dialog = "connectEnd" },
+                onExit = {
+                    if (cs.isHost) {
+                        dialog = "connectHostExit"
+                    } else {
+                        dialog = "none"
+                        cs.leave()
+                        onModes()
+                    }
+                },
+                onClose = { dialog = "none" }
+            )
+            "connectEnd", "connectHostExit" -> ResignDialog(
+                title = if (dialog == "connectEnd") endLabel else "Exit",
+                message = if (dialog == "connectEnd") "Are you sure? Scores will be cleared."
+                else "The game ends for everyone. Exit?",
+                onConfirm = {
+                    dialog = "none"
+                    // Tells every guest "closed", stops the link and clears the game.
+                    cs.leave()
+                    onModes()
+                },
+                onCancel = { dialog = if (dialog == "connectEnd") "connectMenu" else "none" }
+            )
+        }
     }
     }
 }
@@ -650,7 +837,15 @@ fun LudoScreen(
  * and unusable or spent options are dimmed and do nothing.
  */
 @Composable
-private fun MoveOrb(game: LudoGame, index: Int, value: Int, swatch: Swatch, u: Dp) {
+private fun MoveOrb(
+    game: LudoGame,
+    index: Int,
+    value: Int,
+    swatch: Swatch,
+    u: Dp,
+    allowed: Boolean,
+    onTap: (Int) -> Unit
+) {
     val usable = game.optionUsable(index)
     // Display only: on a computer turn the highlight follows the computer's own internal choice.
     val shownOption = if (game.isComputerTurn) game.computerOption else game.selectedDie
@@ -670,6 +865,6 @@ private fun MoveOrb(game: LudoGame, index: Int, value: Int, swatch: Swatch, u: D
             }
             .alpha(if (usable) 1f else 0.4f)
             .then(ring)
-            .clickable(enabled = usable && !game.isComputerTurn) { game.selectDie(index) }
+            .clickable(enabled = usable && allowed && !game.isComputerTurn) { onTap(index) }
     )
 }

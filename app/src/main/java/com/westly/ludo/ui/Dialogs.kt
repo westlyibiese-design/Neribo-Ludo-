@@ -181,7 +181,10 @@ fun WinnerPage(
     scores: List<Int>,
     tournament: Boolean,
     onNext: () -> Unit,
-    onModes: () -> Unit
+    onModes: () -> Unit,
+    /** Connect and Play guests cannot start the next game: the tick is hidden and [waitingText] shows instead. */
+    nextEnabled: Boolean = true,
+    waitingText: String? = null
 ) {
     BackHandler(true) { onModes() }
     Box(
@@ -222,7 +225,22 @@ fun WinnerPage(
                 }
             }
             // Green tick = new game, red X = Game Mode screen
-            HotSpot(k, 179f, 698f, 156f, 156f, onNext)
+            if (nextEnabled) {
+                HotSpot(k, 179f, 698f, 156f, 156f, onNext)
+            } else {
+                // Hide the baked-in tick (same brown as the panel) and say who we are waiting for.
+                Box(
+                    Modifier
+                        .offset(k * 170f, k * 688f)
+                        .size(k * 174f, k * 176f)
+                        .background(Color(0xFF3E2411), RoundedCornerShape(k * 40f))
+                )
+                if (waitingText != null) {
+                    Box(Modifier.offset(k * 59f, k * 624f).size(k * 612f, k * 60f), contentAlignment = Alignment.Center) {
+                        PanelText(waitingText, k, 34f, maxChars = 26)
+                    }
+                }
+            }
             HotSpot(k, 394f, 698f, 156f, 156f, onModes)
         }
     }
@@ -254,6 +272,43 @@ fun MenuDialog(
                 val off = i == 2 && !resignEnabled
                 HotSpot(k, 88f, ys[i], 485f, 108f, if (off) noop else actions[i]) {
                     PanelText(labels[i], k, 46f, modifier = if (off) Modifier.alpha(0.35f) else Modifier)
+                }
+            }
+            HotSpot(k, 582f, 6f, 80f, 80f, onClose)
+        }
+    }
+}
+
+/**
+ * The in-game menu of a Connect and Play game. The host sees End Game / End Tournament and Exit,
+ * a guest only Exit. The panel picture has four buttons, so the unused ones are covered.
+ */
+@Composable
+fun ConnectMenuDialog(
+    isHost: Boolean,
+    endLabel: String,
+    onEnd: () -> Unit,
+    onExit: () -> Unit,
+    onClose: () -> Unit
+) {
+    BackHandler(true) { onClose() }
+    Scrim {
+        Panel(MenuPanel, 0.86f) { k ->
+            val labels = if (isHost) listOf(endLabel, "Exit") else listOf("Exit")
+            val actions = if (isHost) listOf(onEnd, onExit) else listOf(onExit)
+            val ys = listOf(132f, 276f, 420f, 564f)
+            for (i in 0 until 4) {
+                if (i < labels.size) {
+                    HotSpot(k, 88f, ys[i], 485f, 108f, actions[i]) {
+                        PanelText(labels[i], k, 46f, maxChars = 14)
+                    }
+                } else {
+                    Box(
+                        Modifier
+                            .offset(k * 80f, k * (ys[i] - 10f))
+                            .size(k * 501f, k * 128f)
+                            .background(Color(0xFF422914), RoundedCornerShape(k * 30f))
+                    )
                 }
             }
             HotSpot(k, 582f, 6f, 80f, 80f, onClose)
@@ -367,7 +422,10 @@ fun RoundResultDialog(
     outPlayer: Int,
     auto: Boolean,
     fast: Boolean,
-    onNext: () -> Unit
+    onNext: () -> Unit,
+    /** Connect and Play: only the host moves on; guests see [nextLabel] ("Waiting for ...") and a dead button. */
+    nextEnabled: Boolean = true,
+    nextLabel: String = "Next Round"
 ) {
     if (auto) {
         LaunchedEffect(Unit) {
@@ -387,7 +445,7 @@ fun RoundResultDialog(
             // One row per player: red, green, yellow, blue
             val tops = listOf(233f, 376f, 520f, 664f)
             for (i in 0 until 4) {
-                if (i >= names.size) continue   // a 3-player Family game has no fourth row
+                if (i >= names.size || names[i].isEmpty()) continue   // no row for a colour nobody plays
                 val inRound = seeds.getOrElse(i) { -1 } >= 0
                 val isOut = i == outPlayer
                 val a = if (inRound) 1f else 0.4f
@@ -415,8 +473,9 @@ fun RoundResultDialog(
                     )
                 }
             }
-            HotSpot(k, 63f, 840f, 598f, 120f, onNext) {
-                PanelText("Next Round", k, 54f)
+            val noNext: () -> Unit = {}
+            HotSpot(k, 63f, 840f, 598f, 120f, if (nextEnabled) onNext else noNext) {
+                PanelText(nextLabel, k, 54f, maxChars = 14)
             }
         }
     }
@@ -436,7 +495,9 @@ fun TieBreakDialog(
     humanCanRoll: Boolean,
     onRoll: () -> Unit,
     tapPlayer: Int = 0,
-    tapMessage: String? = null
+    tapMessage: String? = null,
+    /** Connect and Play: shown to everybody except the person who has to tap ("Waiting for Joy..."). */
+    waitMessage: String? = null
 ) {
     val pending = tied.filter { rolls.getOrElse(it) { 0 } == 0 }
     val message = when {
@@ -447,7 +508,7 @@ fun TieBreakDialog(
             if (lows.size == 1) "${names.getOrElse(lows[0]) { "" }} is OUT" else "Tie! Lowest roll again"
         }
         humanCanRoll -> tapMessage ?: "Tap your dice to roll"
-        else -> "Highest roll stays. Lowest goes OUT."
+        else -> waitMessage ?: "Highest roll stays. Lowest goes OUT."
     }
     TournamentOverlay {
         Panel(TiePanel, 0.9f) { k ->

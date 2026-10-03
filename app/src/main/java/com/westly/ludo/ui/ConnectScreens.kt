@@ -114,9 +114,9 @@ private fun InfoText(text: String, u: Dp, size: Float = 4.4f, widthU: Float = 84
     )
 }
 
-/** Keeps the screen awake while a lobby is shown, and lets go again afterwards. */
+/** Keeps the screen awake while a lobby or a Connect and Play game is shown, and lets go again afterwards. */
 @Composable
-private fun KeepScreenOn() {
+fun KeepScreenOn() {
     val context = LocalContext.current
     DisposableEffect(Unit) {
         val window = context.findActivity()?.window
@@ -154,12 +154,51 @@ fun ConnectMenuScreen(onBack: () -> Unit, onOffline: () -> Unit) {
 
 /** Offline: host a game or join one. */
 @Composable
-fun ConnectOfflineScreen(onBack: () -> Unit, onHost: () -> Unit, onJoin: () -> Unit) {
+fun ConnectOfflineScreen(onBack: () -> Unit, onHost: () -> Unit, onJoin: () -> Unit, notice: String? = null) {
     ConnectFrame("Offline", 56f, onBack) { u ->
         Spacer(Modifier.height(u * 8f))
         GlossButton("Host a Game", Palette.Green, u * 78f, u * 18f, subtitle = "Show a QR code", onClick = onHost)
         Spacer(Modifier.height(u * 4f))
         GlossButton("Join a Game", Palette.Blue, u * 78f, u * 18f, subtitle = "Scan a QR code", onClick = onJoin)
+        // For example "The host ended the game." after a game was closed by the host.
+        if (notice != null) {
+            Spacer(Modifier.height(u * 6f))
+            InfoText(notice, u)
+        }
+    }
+}
+
+/** A small banner over the board, for example "Waiting for Joy to reconnect...". Takes no taps. */
+@Composable
+fun ConnectNotice(text: String, u: Dp, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(50)
+    Box(
+        modifier
+            .background(Color(0xE60B2E2F), shape)
+            .border(u * 0.3f, Palette.PillEdge, shape)
+            .padding(horizontal = u * 4f, vertical = u * 1.6f)
+    ) {
+        BasicText(text, style = menuText((u * 3.4f).sp()), maxLines = 1, softWrap = false)
+    }
+}
+
+/**
+ * The line shown above the board in a Connect and Play game: a dot for each colour this phone
+ * plays, then "You are Red" / "You are Green + Blue".
+ */
+@Composable
+fun YouAreLabel(colors: List<Color>, text: String, u: Dp) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        for (c in colors) {
+            Box(
+                Modifier
+                    .size(u * 3.2f)
+                    .background(c, RoundedCornerShape(50))
+                    .border(u * 0.3f, Color.White, RoundedCornerShape(50))
+            )
+            Spacer(Modifier.width(u * 1.2f))
+        }
+        BasicText(text, style = menuText((u * 3.6f).sp()), maxLines = 1, softWrap = false)
     }
 }
 
@@ -440,7 +479,6 @@ fun ConnectHostScreen(session: ConnectSession, names: PlayerNames, count: Int, o
 private fun HostLobby(session: ConnectSession, names: PlayerNames, count: Int, onClose: () -> Unit) {
     KeepScreenOn()
     var askClose by remember { mutableStateOf(false) }
-    var showStart by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         if (session.state == ConnectState.IDLE && session.error == null) {
@@ -500,19 +538,14 @@ private fun HostLobby(session: ConnectSession, names: PlayerNames, count: Int, o
                 SeatList(session, u)
                 Spacer(Modifier.height(u * 3f))
                 val enabled = session.isFull
-                val startAction: () -> Unit = { if (session.requestStart()) showStart = true }
+                // Start opens the real game on every phone; the app then moves on to the game screen by itself.
+                val startAction: () -> Unit = { session.requestStart() }
                 GlossButton(
                     "Start", Palette.Green, u * 50f, u * 12f,
                     dimmed = !enabled, onClick = if (enabled) startAction else null
                 )
                 Spacer(Modifier.height(u * 2f))
             }
-        }
-        if (showStart) {
-            ConnectDialog(
-                "Everyone is connected! The game itself arrives in the next update.",
-                "OK", onPrimary = { showStart = false }
-            )
         }
         if (askClose) {
             ConnectDialog(

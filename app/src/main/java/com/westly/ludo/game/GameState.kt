@@ -45,12 +45,32 @@ class Piece(val color: LudoColor, val slot: Int) {
  * You & Computer: Player 1 owns yellow + red, Player 2 owns green + blue (as labelled on the yards).
  * Tournament: four independent players with one color (4 seeds) each, no teams.
  */
-class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
+class LudoGame(
+    val tournament: Boolean = false,
+    val familyPlayers: Int = 0,
+    /**
+     * Connect and Play: the engine players (0 = red ... 3 = blue) that start a Tournament-style game, or
+     * 0 and 1 for a 2-player game. Null for every other mode. A 3-player Connect game may start with
+     * any 3 of the 4 colours.
+     */
+    val connectActive: List<Int>? = null
+) {
     /**
      * Family: humans only on one phone, no computers. 2 players follow the You & Computer rules,
      * 3 or 4 players follow the Tournament rules. Player 1..4 = red, green, yellow, blue.
      */
     val family: Boolean get() = familyPlayers > 0
+
+    /** Connect and Play: humans only, each on their own phone. */
+    val connect: Boolean get() = connectActive != null
+
+    /** No computers at all: Family (one shared phone) and Connect and Play (one phone each). */
+    val humansOnly: Boolean get() = family || connect
+
+    /** The players that are in the game from the very start (everybody in Tournament, fewer in Family / Connect). */
+    private val startSet: List<Int> =
+        connectActive?.distinct()?.sorted()
+            ?: (0 until (if (familyPlayers > 0) familyPlayers else 4)).toList()
 
     /** The names typed for a Family game (index = player). Only used when [family] is true. */
     val familyNames = mutableStateListOf<String>().apply { for (i in 0 until familyPlayers) add("Player ${i + 1}") }
@@ -66,7 +86,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
     }
 
     /** How many players start a Tournament-style game: 4, or 3 in a 3-player Family game. */
-    private val startPlayers: Int get() = if (family) familyPlayers else 4
+    private val startPlayers: Int get() = startSet.size
 
     /** True when the active player rolled a double six and goes again (no "pass the phone"). */
     var bonusRoll by mutableStateOf(false)
@@ -89,7 +109,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
     // ------------------------------------------------------------------
 
     /** Which players are still in the tournament (index = player). */
-    val active = mutableStateListOf(true, true, true, true).also { if (familyPlayers == 3) it[3] = false }
+    val active = mutableStateListOf(true, true, true, true).also { for (i in 0..3) if (i !in startSet) it[i] = false }
 
     /** 1 = four players, 2 = three players, 3 = the final (two players). */
     var round by mutableIntStateOf(1)
@@ -135,6 +155,19 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
 
     /** True while the round banner is showing (computers and taps wait). Not saved. */
     var bannerPending by mutableStateOf(tournament)
+
+    /**
+     * Goes up every time a round banner should be shown. Connect and Play guests watch it, so they
+     * can show the same "Round N" banner for the same time as the host. Not saved.
+     */
+    var bannerSeq by mutableIntStateOf(if (tournament) 1 else 0)
+        private set
+
+    /** Shows the round banner (and tells the guests to show it too). */
+    private fun showBanner() {
+        bannerPending = true
+        bannerSeq++
+    }
 
     // The two dice values (0 = not rolled yet) and whether each has been used this turn.
     var die1 by mutableIntStateOf(0)
@@ -283,7 +316,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
      * Player 1 is always the human. You & Computer: Player 2 is the computer.
      * Tournament: Players 2, 3 and 4 are three independent computers.
      */
-    private val computerSeats: Set<Int> = if (family) emptySet() else if (tournament) setOf(1, 2, 3) else setOf(1)
+    private val computerSeats: Set<Int> = if (humansOnly) emptySet() else if (tournament) setOf(1, 2, 3) else setOf(1)
 
     /** Set while a resign / restart waits for the board to settle, so no computer starts a new action. */
     private var halting = false
@@ -314,7 +347,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
     private val fastMul: Float get() = if (fast) 0.25f else 1f
     private val pace: Float get() = computerSpeed * fastMul
     private val computers: List<ComputerPlayer> =
-        if (family) emptyList()
+        if (humansOnly) emptyList()
         else if (tournament) (1..3).map { ComputerPlayer(it, listOf(TOURNAMENT_COLORS[it])) }
         else listOf(ComputerPlayer(1, listOf(LudoColor.GREEN, LudoColor.BLUE)))
 
@@ -547,12 +580,216 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Connect and Play: the live mirror.
+    // The host runs the real rules. Every guest keeps its own LudoGame only as a DISPLAY MODEL and
+    // fills it from the host's snapshot. applyMirror never runs a rule: no scoring, no capture, no
+    // turn change, no sound, no waiting. It only copies values (restore() must not be used for this,
+    // because it applies pending captures, completes rounds and moves the turn on).
+    // ------------------------------------------------------------------
+
+    private fun pieceRef(p: Piece?): JSONObject? =
+        if (p == null) null else JSONObject().put("color", p.color.name).put("slot", p.slot)
+
+    private fun pieceFromRef(o: JSONObject?): Piece? {
+        if (o == null) return null
+        val color = o.optString("color", "")
+        val slot = o.optInt("slot", -1)
+        return pieces.firstOrNull { it.color.name == color && it.slot == slot }
+    }
+
+    private fun intList(a: JSONArray?): List<Int> =
+        if (a == null) emptyList() else (0 until a.length()).map { a.getInt(it) }
+
+    /** Everything a screen needs to draw this game and to decide what to show. Changes nothing. */
+    fun toMirrorJson(): JSONObject {
+        val o = JSONObject()
+        val arr = JSONArray()
+        for (p in pieces) arr.put(JSONArray().put(p.progress).put(p.finishRank).put(if (p.won) 1 else 0))
+        o.put("pieces", arr)
+        o.put("phase", phase.name)
+        o.put("activePlayer", activePlayer)
+        o.put("winner", winner)
+        o.put("scores", JSONArray().also { a -> scores.forEach { a.put(it) } })
+        o.put("die1", die1)
+        o.put("die2", die2)
+        o.put("used1", used1)
+        o.put("used2", used2)
+        o.put("selectedDie", selectedDie)
+        o.put("face1", face1)
+        o.put("face2", face2)
+        o.put("bonusRoll", bonusRoll)
+        val pk = pick
+        if (pk == null) {
+            o.put("pick", JSONObject.NULL)
+        } else {
+            val items = JSONArray()
+            for (v in pk.items) {
+                val ref = pieceRef(v.tag as? Piece)
+                if (ref != null) items.put(ref)
+            }
+            o.put(
+                "pick",
+                JSONObject()
+                    .put("row", pk.row.toDouble())
+                    .put("col", pk.col.toDouble())
+                    .put("capture", pk.capture)
+                    .put("items", items)
+            )
+        }
+        val pm = pieceRef(pendingMover)
+        o.put("pendingMover", pm ?: JSONObject.NULL)
+        if (tournament) {
+            o.put("active", JSONArray().also { a -> active.forEach { a.put(if (it) 1 else 0) } })
+            o.put("round", round)
+            o.put("eliminatedOrder", JSONArray().also { a -> eliminatedOrder.forEach { a.put(it) } })
+            o.put("overlay", overlay)
+            o.put("resultEnder", resultEnder)
+            o.put("resultOut", resultOut)
+            o.put("resultPlayers", JSONArray().also { a -> resultPlayers.forEach { a.put(it) } })
+            o.put("resultSeeds", JSONArray().also { a -> resultSeeds.forEach { a.put(it) } })
+            o.put("resultResigned", resultResigned)
+            o.put("leaveTo", leaveTo)
+            o.put("tieIds", JSONArray().also { a -> tieIds.forEach { a.put(it) } })
+            o.put("tieRolls", JSONArray().also { a -> tieRolls.forEach { a.put(it) } })
+            o.put("tieRolling", tieRolling)
+            o.put("tieFlicker", tieFlicker)
+            o.put("bannerSeq", bannerSeq)
+        }
+        return o
+    }
+
+    /**
+     * Copies a host snapshot into this display model and does nothing else. Everything is read first
+     * and only then written, so a damaged message throws before anything changes.
+     */
+    fun applyMirror(o: JSONObject) {
+        val pa = o.getJSONArray("pieces")
+        require(pa.length() == pieces.size)
+        val prog = IntArray(pieces.size)
+        val rank = IntArray(pieces.size)
+        val wonFlags = BooleanArray(pieces.size)
+        for (i in pieces.indices) {
+            val a = pa.getJSONArray(i)
+            prog[i] = a.getInt(0)
+            rank[i] = a.getInt(1)
+            wonFlags[i] = a.getInt(2) == 1
+        }
+        val newPhase = Phase.valueOf(o.getString("phase"))
+        val newActive = o.getInt("activePlayer")
+        require(newActive in 0..3)
+        val newWinner = o.getInt("winner")
+        val sc = intList(o.getJSONArray("scores"))
+        require(sc.size == scores.size)
+        val d1 = o.getInt("die1")
+        val d2 = o.getInt("die2")
+        val u1 = o.getBoolean("used1")
+        val u2 = o.getBoolean("used2")
+        val sel = o.getInt("selectedDie")
+        val f1 = o.getInt("face1")
+        val f2 = o.getInt("face2")
+        val bonus = o.getBoolean("bonusRoll")
+
+        var newPick: PiecePick? = null
+        val po = o.optJSONObject("pick")
+        if (po != null) {
+            val items = ArrayList<PieceView>()
+            val ia = po.optJSONArray("items")
+            val row = po.getDouble("row").toFloat()
+            val col = po.getDouble("col").toFloat()
+            if (ia != null) {
+                for (i in 0 until ia.length()) {
+                    val piece = pieceFromRef(ia.optJSONObject(i)) ?: continue
+                    items.add(PieceView(swatchOf(piece.color), row, col, BOARD_R, false, 0f, piece))
+                }
+            }
+            if (items.isNotEmpty()) newPick = PiecePick(row, col, items, po.optBoolean("capture", false))
+        }
+        val newPending = pieceFromRef(o.optJSONObject("pendingMover"))
+
+        var tActive: List<Int> = emptyList()
+        var tRound = 1
+        var tElim: List<Int> = emptyList()
+        var tOverlay = TOverlay.NONE
+        var tEnder = -1
+        var tOut = -1
+        var tPlayers: List<Int> = emptyList()
+        var tSeeds: List<Int> = listOf(0, 0, 0, 0)
+        var tResigned = false
+        var tLeave = -1
+        var tTieIds: List<Int> = emptyList()
+        var tTieRolls: List<Int> = listOf(0, 0, 0, 0)
+        var tRolling = -1
+        var tFlicker = 1
+        var tBanner = 0
+        if (tournament) {
+            tActive = intList(o.getJSONArray("active"))
+            require(tActive.size == 4)
+            tRound = o.getInt("round").coerceIn(1, 3)
+            tElim = intList(o.getJSONArray("eliminatedOrder"))
+            val ov = o.getString("overlay")
+            tOverlay = if (ov == TOverlay.TIEBREAK || ov == TOverlay.RESULT || ov == TOverlay.OUT) ov else TOverlay.NONE
+            tEnder = o.getInt("resultEnder")
+            tOut = o.getInt("resultOut")
+            tPlayers = intList(o.getJSONArray("resultPlayers"))
+            tSeeds = intList(o.getJSONArray("resultSeeds"))
+            require(tSeeds.size == 4)
+            tResigned = o.getBoolean("resultResigned")
+            tLeave = o.getInt("leaveTo")
+            tTieIds = intList(o.getJSONArray("tieIds"))
+            tTieRolls = intList(o.getJSONArray("tieRolls"))
+            require(tTieRolls.size == 4)
+            tRolling = o.getInt("tieRolling")
+            tFlicker = o.getInt("tieFlicker")
+            tBanner = o.getInt("bannerSeq")
+        }
+
+        // Everything parsed: now only plain value copies.
+        for (i in pieces.indices) {
+            pieces[i].progress = prog[i]
+            pieces[i].finishRank = rank[i]
+            pieces[i].won = wonFlags[i]
+        }
+        phase = newPhase
+        activePlayer = newActive
+        winner = newWinner
+        for (i in sc.indices) scores[i] = sc[i]
+        die1 = d1
+        die2 = d2
+        used1 = u1
+        used2 = u2
+        selectedDie = sel
+        face1 = f1
+        face2 = f2
+        bonusRoll = bonus
+        pick = newPick
+        pendingMover = newPending
+        if (tournament) {
+            for (i in 0 until 4) active[i] = tActive[i] != 0
+            round = tRound
+            eliminatedOrder.clear()
+            eliminatedOrder.addAll(tElim)
+            overlay = tOverlay
+            resultEnder = tEnder
+            resultOut = tOut
+            resultPlayers = tPlayers
+            resultSeeds = tSeeds
+            resultResigned = tResigned
+            leaveTo = tLeave
+            tieIds = tTieIds
+            for (i in 0 until 4) tieRolls[i] = tTieRolls[i]
+            tieRolling = tRolling
+            tieFlicker = tFlicker
+            bannerSeq = tBanner
+        }
+    }
+
     /** Loads the Tournament elimination fields. An older save without them is a normal 4-player Round 1. */
     private fun restoreTournament(o: JSONObject) {
         val ac = o.optJSONArray("tActive")
         for (i in 0 until 4) active[i] = if (ac != null && ac.length() == 4) ac.optBoolean(i, true) else true
-        if (activeCount() < 2) for (i in 0 until 4) active[i] = i < startPlayers
-        if (family) for (i in startPlayers until 4) active[i] = false
+        if (activeCount() < 2) for (i in 0 until 4) active[i] = i in startSet
+        if (family || connect) for (i in 0 until 4) if (i !in startSet) active[i] = false
         round = o.optInt("tRound", 1).coerceIn(1, 3)
         eliminatedOrder.clear()
         o.optJSONArray("tElim")?.let { a -> for (i in 0 until a.length()) eliminatedOrder.add(a.getInt(i)) }
@@ -616,7 +853,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
         for (i in 0 until playerCount) scores[i] = 0
         if (tournament) {
             resetTournamentState()
-            bannerPending = true
+            showBanner()
         }
         resetRound()
     }
@@ -639,7 +876,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
         if (tournament) {
             // A new tournament: everybody is back in, scores are kept.
             resetTournamentState()
-            bannerPending = true
+            showBanner()
         }
         resetRound()
     }
@@ -771,7 +1008,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
     }
 
     private fun resetTournamentState() {
-        for (i in 0 until 4) active[i] = i < startPlayers
+        for (i in 0 until 4) active[i] = i in startSet
         round = 1
         eliminatedOrder.clear()
         spectator = false
@@ -859,7 +1096,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
     /** Round Result screen: Next Round (or Continue when the human is out and still has to choose). */
     fun resultNext() {
         if (overlay != TOverlay.RESULT) return
-        if (!family && !active[0] && !spectator) {
+        if (!humansOnly && !active[0] && !spectator) {
             overlay = TOverlay.OUT
             return
         }
@@ -873,7 +1110,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
         resetRound()
         round = (startPlayers + 1 - activeCount()).coerceIn(1, 3)
         activePlayer = if (after in 0..3) nextActiveAfter(after) else firstActive()
-        bannerPending = true
+        showBanner()
     }
 
     /** You're Out > Watch: the human stays as a spectator and the computers play on. */
@@ -916,8 +1153,8 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
     /** The human taps their own dice on the Tie-Break screen. */
     suspend fun tieHumanRoll() {
         if (overlay != TOverlay.TIEBREAK || tieRolling >= 0) return
-        if (family) {
-            // Family: every tied player is a human and taps in turn.
+        if (humansOnly) {
+            // Family and Connect: every tied player is a human and taps in turn.
             val next = tieTurn
             if (next >= 0) rollTieDie(next)
             return
@@ -958,7 +1195,7 @@ class LudoGame(val tournament: Boolean = false, val familyPlayers: Int = 0) {
                 delay((1500 * fastMul).toLong())   // everybody can see the numbers
                 if (overlay != TOverlay.TIEBREAK) return
                 resolveTie()
-            } else if (family || 0 in pending || tieRolling >= 0) {
+            } else if (humansOnly || 0 in pending || tieRolling >= 0) {
                 delay(100)                         // waiting for the human, or a roll is in progress
             } else {
                 delay((800 * fastMul).toLong())

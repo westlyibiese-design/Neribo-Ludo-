@@ -16,6 +16,9 @@ class RosterEntry(
     val isHost: Boolean = false
 )
 
+/** One seat's share of a new game: which engine player it plays and with which colours. */
+class SeatAssignment(val seat: Int, val player: Int, val colors: List<String>)
+
 /**
  * What the QR code carries: the public room letters (also advertised, so a guest can pick the right
  * host when several games are nearby) and the secret token (only ever in the QR code).
@@ -70,6 +73,21 @@ object ConnectProtocol {
     const val T_REJECT = "reject"
     const val T_BYE = "bye"
 
+    // Phase 2: the shared game.
+    const val T_START = "start"
+    const val T_STATE = "state"
+    const val T_INTENT = "intent"
+    const val T_RESYNC = "resync"
+
+    // The kinds of "intent" a guest may send to the host.
+    const val K_ROLL = "roll"
+    const val K_SELECT_DIE = "selectDie"
+    const val K_BOARD_TAP = "boardTap"
+    const val K_PICK_PIECE = "pickPiece"
+    const val K_TIE_ROLL = "tieRoll"
+    const val K_NEXT_ROUND = "nextRound"
+    const val K_NEXT_GAME = "nextGame"
+
     fun endpointName(room: String, hostName: String): String =
         "$ENDPOINT_TAG|$room|${hostName.replace('|', ' ')}"
 
@@ -98,6 +116,35 @@ object ConnectProtocol {
     fun reject(reason: String): JSONObject = base(T_REJECT).put("reason", reason)
 
     fun bye(reason: String): JSONObject = base(T_BYE).put("reason", reason)
+
+    /** Host -> everybody: a game begins (or the next game of the same room). The first "state" follows. */
+    fun start(playerCount: Int, assignment: List<SeatAssignment>, gameNo: Int): JSONObject {
+        val arr = JSONArray()
+        for (a in assignment) {
+            val colors = JSONArray()
+            for (c in a.colors) colors.put(c)
+            arr.put(JSONObject().put("seat", a.seat).put("player", a.player).put("colors", colors))
+        }
+        return base(T_START).put("playerCount", playerCount).put("assignment", arr).put("gameNo", gameNo)
+    }
+
+    /** Host -> everybody: the whole game as it is now. [seq] only ever goes up; [gameNo] says which game it belongs to. */
+    fun state(seq: Int, gameNo: Int, game: JSONObject): JSONObject =
+        base(T_STATE).put("seq", seq).put("gameNo", gameNo).put("game", game)
+
+    /** Guest -> host: a tap, to be checked and carried out by the host. */
+    fun intent(kind: String): JSONObject = base(T_INTENT).put("kind", kind)
+
+    fun intentSelectDie(i: Int): JSONObject = intent(K_SELECT_DIE).put("i", i)
+
+    fun intentBoardTap(row: Float, col: Float): JSONObject =
+        intent(K_BOARD_TAP).put("row", row.toDouble()).put("col", col.toDouble())
+
+    fun intentPickPiece(color: String, slot: Int): JSONObject =
+        intent(K_PICK_PIECE).put("color", color).put("slot", slot)
+
+    /** Guest -> host: please send the game state again. */
+    fun resync(): JSONObject = base(T_RESYNC)
 
     private fun rosterToJson(roster: List<RosterEntry>): JSONArray {
         val arr = JSONArray()
