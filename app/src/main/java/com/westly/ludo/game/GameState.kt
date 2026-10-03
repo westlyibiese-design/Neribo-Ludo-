@@ -1257,6 +1257,61 @@ class LudoGame(
         phase = Phase.RoundBreak
     }
 
+    /**
+     * Connect and Play: the host removes [player], whose phone is gone for good.
+     * 2 players: the other person wins the point, exactly like Resign. 3 or 4 players: [player] is knocked
+     * out like any other knock-out and the normal Round Result screen follows (a Connect game has no
+     * "You're out" screen); when only two players are left the other one wins the tournament.
+     */
+    suspend fun connectRemove(player: Int) {
+        if (!connect || player !in 0..3) return
+        if (!tournament) {
+            resign(player)
+            return
+        }
+        halting = true
+        try {
+            settle()
+            if (phase == Phase.GameOver || !active[player]) return
+            connectKnockOut(player)
+        } finally {
+            halting = false
+        }
+    }
+
+    private fun connectKnockOut(player: Int) {
+        val to = resignBeneficiary(player)
+        pick = null
+        pendingMover = null
+        selectedDie = -1
+        if (activeCount() <= 2) {
+            finishTournament(to)   // the final: the other person wins
+            return
+        }
+        if (overlay == TOverlay.TIEBREAK) {
+            // The roll-off is waiting for this person: they are the one who goes out.
+            if (player !in tieIds) return
+            resultResigned = true
+            leaveTo = to
+            finishElimination(player)
+            return
+        }
+        if (overlay != TOverlay.NONE) return   // a result is already showing: the host continues first
+        resultPlayers = (0 until 4).filter { active[it] }
+        resultSeeds = (0 until 4).map { if (active[it]) seedsOut(it) else -1 }
+        active[player] = false
+        eliminatedOrder.add(player)
+        resultEnder = -1
+        resultOut = player
+        resultResigned = true
+        leaveTo = to
+        tieIds = emptyList()
+        for (i in 0 until 4) tieRolls[i] = 0
+        tieRolling = -1
+        overlay = TOverlay.RESULT
+        phase = Phase.RoundBreak
+    }
+
     // ---- Dice roll-off (Tie-Break screen) ----
 
     /** The human taps their own dice on the Tie-Break screen. */

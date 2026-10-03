@@ -52,6 +52,7 @@ import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.westly.ludo.connect.ConnectSession
+import com.westly.ludo.connect.LinkState
 import com.westly.ludo.game.LudoColor
 import com.westly.ludo.game.LudoGame
 import com.westly.ludo.game.GameSettings
@@ -63,7 +64,11 @@ import com.westly.ludo.ui.BoardThemes
 import com.westly.ludo.ui.ChangeNamesDialog
 import com.westly.ludo.ui.ConfigurationScreen
 import com.westly.ludo.ui.ConnectCountScreen
+import com.westly.ludo.ui.ConnectDialog
 import com.westly.ludo.ui.ConnectMenuDialog
+import com.westly.ludo.ui.ConnectQrDialog
+import com.westly.ludo.ui.ConnectResumeScreen
+import com.westly.ludo.ui.ConnectWaitBanner
 import com.westly.ludo.ui.ConnectNotice
 import com.westly.ludo.ui.ConnectHostScreen
 import com.westly.ludo.ui.ConnectJoinScreen
@@ -173,9 +178,17 @@ class MainActivity : ComponentActivity() {
         saveGame()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // A guest whose phone was locked checks its link to the host; a host makes sure it is still advertising.
+        connect.onAppForeground()
+    }
+
     override fun onStop() {
         super.onStop()
         saveGame()
+        // A hosted game is saved so it can be resumed if the app is closed.
+        connect.saveHostNow()
     }
 
     override fun onDestroy() {
@@ -204,6 +217,8 @@ fun LudoApp(
     var familyCount by rememberSaveable { mutableStateOf(2) }
     // How many players the Connect and Play host picked.
     var connectCount by rememberSaveable { mutableStateOf(2) }
+    // The join screen was opened by the Rejoin button (no scanning).
+    var connectRejoin by rememberSaveable { mutableStateOf(false) }
 
     // The screen's coroutine scope has the frame clock the host needs to run move animations.
     SideEffect { connect.bindScope(scope) }
@@ -212,11 +227,17 @@ fun LudoApp(
 
     // Any screen other than the lobby screens and the Connect game closes the nearby connection.
     LaunchedEffect(screen) {
-        if (screen != "connect_host" && screen != "connect_join" && screen != "connect_game") connect.leave()
+        if (screen != "connect_host" && screen != "connect_join" && screen != "connect_game" &&
+            screen != "connect_resume"
+        ) {
+            connect.leave()
+        }
     }
-    // The host pressed Start (a guest is told the game began): everybody opens the game screen.
+    // The host pressed Start (a guest is told the game began, or a returning phone found its game): everybody opens the game screen.
     LaunchedEffect(connect.inGame) {
-        if (connect.inGame && (screen == "connect_host" || screen == "connect_join")) screen = "connect_game"
+        if (connect.inGame && (screen == "connect_host" || screen == "connect_join" || screen == "connect_resume")) {
+            screen = "connect_game"
+        }
     }
     // The game is over for this phone (the host ended it or the link dropped): back to the Offline screen.
     LaunchedEffect(connect.inGame, connect.ended) {
@@ -237,7 +258,7 @@ fun LudoApp(
             "connect" -> "modes"
             "connect_game" -> "connect_offline"
             "connect_offline" -> "connect"
-            "connect_count", "connect_host", "connect_join" -> "connect_offline"
+            "connect_count", "connect_host", "connect_join", "connect_resume" -> "connect_offline"
             "config", "sound", "rules" -> "settings"
             else -> "home"
         }
@@ -281,9 +302,25 @@ fun LudoApp(
                     },
                     onJoin = {
                         connectNotice = null
+                        connectRejoin = false
                         screen = "connect_join"
                     },
-                    notice = connectNotice
+                    notice = connectNotice,
+                    rejoin = connect.rejoinInfo,
+                    onRejoin = {
+                        connectNotice = null
+                        connectRejoin = true
+                        screen = "connect_join"
+                    },
+                    resume = connect.hostSaveInfo,
+                    onResume = {
+                        connectNotice = null
+                        screen = "connect_resume"
+                    }
+                )
+                "connect_resume" -> ConnectResumeScreen(
+                    connect, names,
+                    onClose = { screen = "connect_offline" }
                 )
                 "connect_count" -> ConnectCountScreen(
                     onBack = { screen = "connect_offline" },
@@ -298,7 +335,8 @@ fun LudoApp(
                 )
                 "connect_join" -> ConnectJoinScreen(
                     connect, names,
-                    onClose = { screen = "connect_offline" }
+                    onClose = { screen = "connect_offline" },
+                    rejoin = connectRejoin
                 )
                 "connect_game" -> connect.game?.let { cg ->
                     KeepScreenOn()
@@ -446,13 +484,17 @@ fun LudoScreen(
         } else if (cs.isHost) {
             dialog = "connectHostExit"
         } else {
-            cs.leave()
-            onModes()
+            dialog = "connectLeave"
         }
         Unit
     }
+    // Connect: the seat the host is about to remove (asked to confirm first).
+    var removeSeat by remember { mutableStateOf(-1) }
     if (cs != null) {
-        BackHandler(enabled = dialog == "none") { dialog = "connectMenu" }
+        val covered = cs.finalText != null || cs.link != LinkState.OK
+        BackHandler(enabled = dialog == "none" && !covered) { dialog = "connectMenu" }
+        // A final message or a lost link has its own buttons: the back key does nothing then.
+        BackHandler(enabled = covered) { }
     }
     // Computers also wait while a Tournament overlay (Tie-Break / Round Result / You're Out) or the round banner is showing.
     val overlayOpen = tournament && game.overlay != TOverlay.NONE
@@ -512,7 +554,7 @@ fun LudoScreen(
                         Modifier.align(Alignment.TopEnd).padding(end = u * 1f, top = u * 1f)
                             .clickable { exitAction() }
                     )
-                    if (cs != null && cs.myColors.isNotEmpty()) {
+                    if (cs != null && (cs.myColors.isNotEmpty() || cs.watching)) {
                         // Which colours are mine. Under the turn pill in Tournament-style games, at the top otherwise.
                         Box(
                             Modifier.align(Alignment.TopCenter)
@@ -646,13 +688,33 @@ fun LudoScreen(
                 )
             }
 
-            // Connect: a phone dropped, so the game waits for that person.
-            val waitName = cs?.waitingForName
-            if (waitName != null) {
-                ConnectNotice(
-                    "Waiting for $waitName to reconnect...", u,
-                    Modifier.align(Alignment.TopCenter).padding(top = boardTop + u * 1f)
-                )
+            // Connect: small notices over the board (knocked out, watching, a phone dropped, watcher count).
+            if (cs != null) {
+                val waitSeat = cs.waitingForSeat
+                val statusLine = when {
+                    cs.watching -> "You are watching"
+                    cs.iAmOut -> "You are out - watching"
+                    else -> null
+                }
+                val watchers = if (cs.isHost) cs.watcherCount else 0
+                if (statusLine != null || waitSeat >= 0 || watchers > 0) {
+                    Column(
+                        Modifier.align(Alignment.TopCenter).padding(top = boardTop + u * 1f),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(u * 1f)
+                    ) {
+                        if (statusLine != null) ConnectNotice(statusLine, u)
+                        if (waitSeat >= 0) {
+                            ConnectWaitBanner(
+                                "Waiting for ${cs.seatName(waitSeat)} to reconnect...",
+                                canRemove = cs.canRemove(waitSeat),
+                                onRemove = { removeSeat = waitSeat },
+                                u = u
+                            )
+                        }
+                        if (watchers > 0) ConnectNotice("Watching: $watchers", u)
+                    }
+                }
             }
 
             // Round banner: fades in and out over the board, takes no taps.
@@ -780,8 +842,10 @@ fun LudoScreen(
                 tournament = tournament,
                 onNext = { cs.tapNextGame() },
                 onModes = { exitAction() },
-                nextEnabled = cs.isHost,
-                waitingText = if (cs.isHost) null else "Waiting for ${cs.hostName}..."
+                // A game with a removed person cannot go on: the host ends it from the menu.
+                nextEnabled = cs.isHost && !cs.hasRemoved,
+                waitingText = if (!cs.isHost) "Waiting for ${cs.hostName}..."
+                else if (cs.hasRemoved) "Someone left: end the game" else null
             )
         } else {
             WinnerPage(
@@ -811,12 +875,30 @@ fun LudoScreen(
                     if (cs.isHost) {
                         dialog = "connectHostExit"
                     } else {
-                        dialog = "none"
-                        cs.leave()
-                        onModes()
+                        dialog = "connectLeave"
                     }
                 },
-                onClose = { dialog = "none" }
+                onClose = { dialog = "none" },
+                watchersOn = cs.allowWatchers,
+                onToggleWatchers = { cs.setAllowWatchers(!cs.allowWatchers) },
+                onShowQr = { dialog = "connectQr" }
+            )
+            "connectQr" -> ConnectQrDialog(
+                ticketText = cs.ticketText,
+                watching = cs.watcherCount,
+                allowWatchers = cs.allowWatchers,
+                onClose = { dialog = "connectMenu" }
+            )
+            "connectLeave" -> ConnectDialog(
+                "Leave the game? You can come back later.",
+                "Leave", onPrimary = {
+                    dialog = "none"
+                    // The remembered game stays, so the Rejoin button can bring this person back.
+                    cs.leave()
+                    onModes()
+                },
+                secondaryLabel = "Stay", onSecondary = { dialog = "none" },
+                primarySwatch = Palette.Red
             )
             "connectEnd", "connectHostExit" -> ResignDialog(
                 title = if (dialog == "connectEnd") endLabel else "Exit",
@@ -824,11 +906,58 @@ fun LudoScreen(
                 else "The game ends for everyone. Exit?",
                 onConfirm = {
                     dialog = "none"
-                    // Tells every guest "closed", stops the link and clears the game.
-                    cs.leave()
-                    onModes()
+                    // Tells every phone the game ended and clears the saved game. The host then sees the
+                    // same "Game ended" panel and leaves with OK.
+                    cs.endForEveryone()
                 },
                 onCancel = { dialog = if (dialog == "connectEnd") "connectMenu" else "none" }
+            )
+        }
+
+        // Host: Remove player, after asking.
+        if (removeSeat >= 0) {
+            val seat = removeSeat
+            // The phone may have come back while the question was open.
+            if (!cs.canRemove(seat)) {
+                removeSeat = -1
+            } else {
+                ConnectDialog(
+                    "Remove ${cs.seatName(seat)} from the game?" +
+                        (if (!tournament) "\nThe other player wins the point." else ""),
+                    "Remove", onPrimary = {
+                        removeSeat = -1
+                        cs.removePlayer(seat)
+                    },
+                    secondaryLabel = "Cancel", onSecondary = { removeSeat = -1 },
+                    primarySwatch = Palette.Red
+                )
+            }
+        }
+
+        // This phone's own link to the host is down (or the host is gone): the game waits.
+        if (cs.finalText == null && cs.link == LinkState.RECONNECTING) {
+            ConnectDialog(
+                "Reconnecting...\nWaiting for the host...",
+                "Leave", onPrimary = { dialog = "connectLeave" }
+            )
+        } else if (cs.finalText == null && cs.link == LinkState.FAILED) {
+            ConnectDialog(
+                "Couldn't reach the host yet.",
+                "Try again", onPrimary = { cs.retryReconnect() },
+                secondaryLabel = "Leave", onSecondary = { dialog = "connectLeave" }
+            )
+        }
+
+        // The session is over for this person: the host ended it, they were removed, or the game is gone.
+        val finalMessage = cs.finalText
+        if (finalMessage != null) {
+            ConnectDialog(
+                finalMessage,
+                "OK", onPrimary = {
+                    dialog = "none"
+                    cs.leave()
+                    onModes()
+                }
             )
         }
     }

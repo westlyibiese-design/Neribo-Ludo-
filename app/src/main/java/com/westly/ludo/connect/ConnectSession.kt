@@ -23,6 +23,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -45,9 +46,27 @@ enum class ConnectState {
     /** Guest: found the host, connecting and waiting for a seat. */
     CONNECTING,
 
-    /** Guest: has a seat and sees the live player list. */
+    /** Guest: has a seat (or a watcher's place) and sees the live player list. */
     GUEST_LOBBY
 }
+
+/** Guest, while a game is on screen: how the link to the host is doing. */
+enum class LinkState {
+    /** Connected (or nothing is wrong that this phone knows about). */
+    OK,
+
+    /** The link dropped; the phone is looking for the host again by itself. */
+    RECONNECTING,
+
+    /** The 30 seconds ran out: the screen offers Try again. */
+    FAILED
+}
+
+/** The game this guest can return to (shown as the Rejoin button). */
+class RejoinInfo(val room: String, val hostName: String, val watcher: Boolean)
+
+/** The game this host can resume (shown as the Resume hosted game button). */
+class HostSaveInfo(val room: String, val playerCount: Int)
 
 /**
  * Everything the Connect and Play screens show, plus the host / guest logic behind it.
@@ -112,6 +131,44 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         get() = prefs.getString(KEY_DEVICE_ID, null)
             ?: UUID.randomUUID().toString().also { prefs.edit().putString(KEY_DEVICE_ID, it).apply() }
 
+    // ----- Phase 4: leave and return -----
+
+    /** Guest: how the link to the host is doing while a game is on screen. */
+    var link by mutableStateOf(LinkState.OK)
+        private set
+
+    /** Guest: this phone has no seat and only watches. */
+    var watching by mutableStateOf(false)
+        private set
+
+    /** Host: whether people without a seat may scan the QR code and watch. Off by default. */
+    var allowWatchers by mutableStateOf(false)
+        private set
+
+    /** Host: how many watchers are connected right now. */
+    var watcherCount by mutableStateOf(0)
+        private set
+
+    /**
+     * A message that covers the game screen with one OK button: the host ended the session, this person
+     * was removed, or the game could not be found. The game screen stays up until OK so the person can read it.
+     */
+    var finalText by mutableStateOf<String?>(null)
+        private set
+
+    /** Guest: the game this phone can return to, or null (drives the Rejoin button). */
+    var rejoinInfo by mutableStateOf<RejoinInfo?>(null)
+        private set
+
+    /** Host: the saved game that can be resumed, or null (drives the Resume hosted game button). */
+    var hostSaveInfo by mutableStateOf<HostSaveInfo?>(null)
+        private set
+
+    init {
+        rejoinInfo = readSavedSession()?.let { RejoinInfo(it.room, it.hostName, it.watcher) }
+        hostSaveInfo = readHostSaveInfo()
+    }
+
     // ----- The shared game (Phase 2) -----
 
     /**
@@ -168,13 +225,82 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
 
     val myColors: List<LudoColor> get() = colorsOfSeat(mySeat)
 
-    /** "You are Red" or "You are Green + Blue". */
+    /** "You are Red" or "You are Green + Blue" ("You are watching" for a watcher). */
     val youAreText: String
-        get() = "You are " + myColors.joinToString(" + ") { colorWord(it) }
+        get() = if (watching) "You are watching"
+        else "You are " + myColors.joinToString(" + ") { colorWord(it) }
+
+    /** True when this person was knocked out of the tournament and is only watching the rest. */
+    val iAmOut: Boolean
+        get() {
+            val g = game ?: return false
+            val p = myPlayer
+            return p >= 0 && g.tournament && !g.active[p]
+        }
+
+    /** True when [seat] was knocked out of the tournament. */
+    fun isSeatOut(seat: Int): Boolean {
+        val g = game ?: return false
+        val p = playerOfSeat.getOrElse(seat) { -1 }
+        return p >= 0 && g.tournament && !g.active[p]
+    }
+
+    /** True when somebody was removed by the host (no new game can start then). */
+    val hasRemoved: Boolean get() = roster.any { it.removed }
+
+    /** A seat whose phone dropped and that the game still needs (not knocked out, not removed). */
+    private fun isGone(seat: Int): Boolean {
+        val e = roster.firstOrNull { it.seat == seat } ?: return false
+        return !e.connected && !e.removed && !isSeatOut(seat)
+    }
+
+    /**
+     * The seat everybody is waiting for, or -1. A dropped person whose turn it is (or whose tie-break roll
+     * is due) comes first; otherwise the first dropped person. Nothing is shown while this phone's own link is down.
+     */
+    val waitingForSeat: Int
+        get() {
+            if (!inGame || link != LinkState.OK) return -1
+            val g = game
+            if (g != null) {
+                val blocker = when {
+                    g.overlay == TOverlay.TIEBREAK -> g.tieTurn
+                    g.overlay == TOverlay.NONE && g.phase != Phase.GameOver -> g.activePlayer
+                    else -> -1
+                }
+                if (blocker >= 0) {
+                    val s = seatOfPlayer(blocker)
+                    if (s >= 0 && isGone(s)) return s
+                }
+            }
+            return roster.firstOrNull { isGone(it.seat) }?.seat ?: -1
+        }
 
     /** The person whose phone dropped, or null when everybody is connected. */
     val waitingForName: String?
-        get() = if (!inGame) null else roster.firstOrNull { !it.connected }?.name
+        get() {
+            val s = waitingForSeat
+            return if (s < 0) null else seatName(s)
+        }
+
+    /**
+     * Host only: true when the seat's connection is lost and the game is at a moment where the person can
+     * be taken out (never for a connected person, never for the host, never while a result is showing).
+     */
+    fun canRemove(seat: Int): Boolean {
+        if (role != ConnectRole.HOST || !started || !inGame || sessionEnded || seat <= 0) return false
+        val g = game ?: return false
+        val e = roster.firstOrNull { it.seat == seat } ?: return false
+        if (e.connected || e.removed) return false
+        val p = playerOfSeat.getOrElse(seat) { -1 }
+        if (p < 0 || g.phase == Phase.GameOver) return false
+        if (g.tournament && !g.active[p]) return false
+        return when (g.overlay) {
+            TOverlay.NONE -> true
+            TOverlay.TIEBREAK -> p in g.tieIds
+            else -> false
+        }
+    }
 
     /** The screen that runs the game gives its coroutine scope (it has the frame clock the move animations need). */
     fun bindScope(ui: CoroutineScope) {
@@ -188,7 +314,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     fun canAct(): Boolean {
         val g = game ?: return false
         val me = myPlayer
-        if (me < 0) return false
+        if (me < 0 || watching || finalText != null || link != LinkState.OK) return false
         return when (g.phase) {
             Phase.AwaitRoll, Phase.Choose, Phase.CaptureChoose -> g.activePlayer == me
             else -> false
@@ -323,6 +449,40 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     private var guestTimer: Job? = null
     private val random = SecureRandom()
 
+    // ----- Phase 4 working state -----
+
+    /** Host: the watchers (people without a seat) that are connected: endpoint -> their device id. */
+    private val watcherByEndpoint = HashMap<String, String>()
+
+    /** Host: the session was ended with End Game / End Tournament; the host stays on a final panel until it leaves. */
+    private var sessionEnded = false
+
+    /** Host: the "ended" message, kept so that a phone that comes back while the final panel is up gets the same news. */
+    private var lastEnded: JSONObject? = null
+
+    /** Host: the winner of the last finished game of this room ("" if none finished yet). */
+    private var lastWinner = ""
+
+    /** Host: which seats were out or removed when the roster was last sent (one bit per seat). */
+    private var lastOutMask = 0
+
+    /** Host: the game changed since it was last saved, and when it was last saved. */
+    private var saveDirty = false
+    private var lastSaveAt = 0L
+
+    /** Guest: this join is a return to a remembered game, and the role to ask for in the hello. */
+    private var rejoining = false
+    private var helloRole = ConnectProtocol.ROLE_PLAYER
+
+    /** Guest: the loop that looks for the host again after the link dropped. */
+    private var reconnectJob: Job? = null
+
+    /** Guest: when anything last arrived from the host (SystemClock.elapsedRealtime). */
+    private var lastHeardAt = 0L
+
+    /** Guest: when the current reconnect try began. */
+    private var attemptAt = 0L
+
     // ----- Starting and leaving -----
 
     /** Host: opens a lobby for [count] players and starts advertising. */
@@ -351,8 +511,11 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         }
     }
 
-    /** Guest: finds the host named in the scanned [ticket] and asks for a seat. */
-    fun startJoin(ticket: JoinTicket, name: String) {
+    /**
+     * Guest: finds the host named in the scanned [ticket] and asks for a seat. [rejoin] = this is a return to
+     * a remembered game (nothing found then means the game is gone), [watcher] = ask to watch, not to play.
+     */
+    fun startJoin(ticket: JoinTicket, name: String, rejoin: Boolean = false, watcher: Boolean = false) {
         leave()
         if (ticket.version != ConnectProtocol.PROTOCOL_VERSION) {
             error = MSG_VERSION
@@ -363,13 +526,210 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         roomCode = ticket.room
         token = ticket.token
         myName = cleanName(name)
+        rejoining = rejoin
+        helloRole = if (watcher) ConnectProtocol.ROLE_WATCHER else ConnectProtocol.ROLE_PLAYER
         state = ConnectState.SEARCHING
         manager.startDiscovery { problem ->
             if (g == generation && problem != null) failJoin(MSG_SEARCH_FAILED)
         }
         guestTimer = scope.launch {
             delay(DISCOVERY_TIMEOUT_MS)
-            if (g == generation && state == ConnectState.SEARCHING) failJoin(MSG_NOT_FOUND)
+            if (g == generation && state == ConnectState.SEARCHING) {
+                if (rejoining) {
+                    // The host is not around any more: forget the game.
+                    clearLastSession()
+                    failJoin(MSG_GAME_NOT_FOUND)
+                } else {
+                    failJoin(MSG_NOT_FOUND)
+                }
+            }
+        }
+    }
+
+    /** Guest: returns to the remembered game (the Rejoin button). */
+    fun startRejoin(name: String) {
+        val saved = readSavedSession()
+        if (saved == null) {
+            leave()
+            rejoinInfo = null
+            error = MSG_GAME_NOT_FOUND
+            return
+        }
+        startJoin(JoinTicket(saved.room, saved.token), name, rejoin = true, watcher = saved.watcher)
+    }
+
+    /** Guest: the Try again button after the 30 seconds of looking for the host ran out. */
+    fun retryReconnect() {
+        if (role != ConnectRole.GUEST || !inGame || finalText != null) return
+        if (link == LinkState.RECONNECTING) return
+        link = LinkState.RECONNECTING
+        runReconnectLoop()
+    }
+
+    /**
+     * The app came back to the foreground. A guest checks that the host still answers (a locked phone often
+     * loses its link without being told) and looks for the host again if not. A host makes sure it is advertising.
+     */
+    fun onAppForeground() {
+        when (role) {
+            ConnectRole.GUEST -> {
+                if (!inGame || finalText != null) return
+                when (link) {
+                    LinkState.OK -> checkLink()
+                    LinkState.FAILED -> retryReconnect()
+                    LinkState.RECONNECTING -> Unit
+                }
+            }
+            ConnectRole.HOST -> {
+                if (started && !sessionEnded) {
+                    // Harmless when it is already advertising: the answer is ignored.
+                    manager.startAdvertising(ConnectProtocol.endpointName(roomCode, hostName)) { }
+                }
+            }
+            null -> Unit
+        }
+    }
+
+    /** Host: writes the running game to the saved settings now (the app is going to the background). */
+    fun saveHostNow() {
+        maybeSave(force = true)
+    }
+
+    /** Host: the Allow watchers switch. */
+    fun setAllowWatchers(on: Boolean) {
+        if (role != ConnectRole.HOST) return
+        allowWatchers = on
+        saveDirty = true
+        broadcastLobby()
+    }
+
+    /**
+     * Host: takes [seat] out of the game (Remove player). The engine does the rest on the queue, so it never
+     * runs at the same moment as a tap. Only allowed for a seat whose connection is lost.
+     */
+    fun removePlayer(seat: Int) {
+        if (!canRemove(seat)) return
+        enqueue(HostIntent(0, K_REMOVE, i = seat))
+    }
+
+    /**
+     * Host: End Game / End Tournament. Everybody is told, the saved game is deleted, and the host stays on a
+     * final panel (still answering phones that come back, with the same news) until it presses OK.
+     */
+    fun endForEveryone() {
+        if (role != ConnectRole.HOST || !started || sessionEnded) return
+        val g = game
+        if (g != null && g.phase == Phase.GameOver && g.winner >= 0) lastWinner = playerName(g.winner)
+        val seats = roster.sortedBy { it.seat }
+        val names = seats.map { it.name }
+        val scores = seats.map { scoreOfSeat(it.seat) }
+        sessionEnded = true
+        queue.clear()
+        runnerJob?.cancel()
+        runnerJob = null
+        draining = false
+        val message = ConnectProtocol.ended(lastWinner, names, scores)
+        lastEnded = message
+        manager.send(allEndpoints(), message)
+        clearHostSave()
+        finalText = endedText(lastWinner, names, scores)
+    }
+
+    /**
+     * Host: the Resume hosted game button. Rebuilds the game from the saved one, advertises again with the
+     * same room code and token, and lets returning guests take their old seats. Returns false (with [error]
+     * set) when nothing could be resumed.
+     */
+    fun resumeHosting(name: String): Boolean {
+        leave()
+        val text = prefs.getString(KEY_HOST_SAVE, null)
+        if (text == null || uiScope == null) {
+            hostSaveInfo = null
+            error = MSG_RESUME_FAILED
+            return false
+        }
+        try {
+            val o = JSONObject(text)
+            val count = o.getInt("playerCount")
+            if (count !in 2..4) throw IllegalStateException("players")
+            val room = o.getString("room")
+            val tok = o.getString("token")
+            val ticket = JoinTicket(room, tok)
+            if (JoinTicket.parse(ticket.toText()) == null) throw IllegalStateException("ticket")
+            val orderArr = o.getJSONArray("order")
+            val order = ArrayList<Int>()
+            for (i in 0 until orderArr.length()) order.add(orderArr.getInt(i))
+            if (order.size != count || order.toSet().size != count || order.any { it !in 0..3 }) {
+                throw IllegalStateException("order")
+            }
+            if (count == 2 && order.any { it > 1 }) throw IllegalStateException("order")
+            val seats = o.getJSONArray("roster")
+            val entries = ArrayList<RosterEntry>()
+            for (i in 0 until seats.length()) {
+                val r = seats.getJSONObject(i)
+                val seat = r.getInt("seat")
+                if (seat !in 0 until count) continue
+                entries.add(
+                    RosterEntry(
+                        seat = seat,
+                        name = cleanName(r.optString("name", "Player")),
+                        deviceId = if (seat == 0) deviceId else r.optString("deviceId", ""),
+                        connected = seat == 0,
+                        isHost = seat == 0,
+                        out = false,
+                        removed = r.optBoolean("removed", false)
+                    )
+                )
+            }
+            if (entries.size != count || entries.none { it.seat == 0 }) throw IllegalStateException("roster")
+            val engine = LudoGame(tournament = count >= 3, connectActive = order)
+            if (!engine.restore(o.getString("engine"))) throw IllegalStateException("engine")
+            engine.visualSink = { e -> onEngineEvent(e) }
+
+            val g = generation
+            role = ConnectRole.HOST
+            playerCount = count
+            hostName = entries.first { it.seat == 0 }.name
+            mySeat = 0
+            roomCode = room
+            token = tok
+            ticketText = ticket.toText()
+            roster.clear()
+            roster.addAll(entries.sortedBy { it.seat })
+            playerOfSeat.clear()
+            playerOfSeat.addAll(order)
+            val saved = o.optJSONArray("scores")
+            for (i in seatScores.indices) seatScores[i] = saved?.optInt(i, 0) ?: 0
+            allowWatchers = o.optBoolean("allowWatchers", false)
+            lastWinner = o.optString("lastWinner", "")
+            gameNo = o.optInt("gameNo", 1).coerceAtLeast(1)
+            resetLive()
+            game = engine
+            started = true
+            sessionEnded = false
+            seq = 0
+            lastSent = ""
+            lastOutMask = 0
+            state = ConnectState.STARTING
+            manager.startAdvertising(ConnectProtocol.endpointName(room, hostName)) { problem ->
+                if (g == generation && role == ConnectRole.HOST) {
+                    if (problem == null) {
+                        state = ConnectState.HOST_LOBBY
+                        inGame = true
+                        startPublisher()
+                        publish(force = true)
+                    } else {
+                        teardown()
+                        error = MSG_HOST_FAILED
+                    }
+                }
+            }
+            return true
+        } catch (e: Exception) {
+            teardown()
+            clearHostSave()
+            error = MSG_RESUME_FAILED
+            return false
         }
     }
 
@@ -384,6 +744,9 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         if (roster.any { !it.connected }) return false
         if (uiScope == null) return false
         started = true
+        sessionEnded = false
+        lastEnded = null
+        lastWinner = ""
         for (i in seatScores.indices) seatScores[i] = 0
         gameNo = 0
         beginGame()
@@ -416,7 +779,8 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         val assignment = order.indices.map { seat ->
             SeatAssignment(seat, order[seat], colorsOfSeat(seat).map { it.name })
         }
-        manager.send(seatByEndpoint.keys.toList(), ConnectProtocol.start(playerCount, assignment, gameNo))
+        lastOutMask = 0
+        manager.send(allEndpoints(), ConnectProtocol.start(playerCount, assignment, gameNo))
         publish(force = true)
     }
 
@@ -433,6 +797,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
             while (g == generation && role == ConnectRole.HOST) {
                 delay(PUBLISH_INTERVAL_MS)
                 publish(force = false)
+                maybeSave(force = false)
             }
         }
     }
@@ -443,20 +808,36 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      */
     private fun publish(force: Boolean) {
         val g = game ?: return
-        if (role != ConnectRole.HOST || !started) return
+        if (role != ConnectRole.HOST || !started || sessionEnded) return
         if (g.phase == Phase.GameOver) {
             for (seat in playerOfSeat.indices) seatScores[seat] = g.scores.getOrElse(playerOfSeat[seat]) { 0 }
+            if (g.winner >= 0) lastWinner = playerName(g.winner)
+        }
+        // Somebody was knocked out or removed: everybody's seat list gets the new flags.
+        val mask = outMask()
+        if (mask != lastOutMask) {
+            lastOutMask = mask
+            broadcastLobby()
         }
         val snapshot = g.toMirrorJson()
         val text = snapshot.toString()
         if (!force && text == lastSent) return
         lastSent = text
+        saveDirty = true
         seq++
-        manager.send(seatByEndpoint.keys.toList(), ConnectProtocol.state(seq, gameNo, snapshot))
+        manager.send(allEndpoints(), ConnectProtocol.state(seq, gameNo, snapshot))
+    }
+
+    /** One bit per seat that is knocked out or removed. */
+    private fun outMask(): Int {
+        var m = 0
+        for (e in roster) if (e.removed || isSeatOut(e.seat)) m = m or (1 shl e.seat)
+        return m
     }
 
     private fun hostResync(endpointId: String) {
-        if (!started || !seatByEndpoint.containsKey(endpointId)) return
+        if (!started) return
+        if (!seatByEndpoint.containsKey(endpointId) && !watcherByEndpoint.containsKey(endpointId)) return
         val g = game ?: return
         seq++
         manager.send(endpointId, ConnectProtocol.state(seq, gameNo, g.toMirrorJson()))
@@ -503,7 +884,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      * emptied by one coroutine, one tap at a time: two taps never run the engine at the same moment.
      */
     private fun enqueue(intent: HostIntent) {
-        if (role != ConnectRole.HOST || !started) return
+        if (role != ConnectRole.HOST || !started || sessionEnded) return
         if (queue.size >= MAX_QUEUE) return
         queue.addLast(intent)
         if (draining) return
@@ -581,9 +962,31 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
             ConnectProtocol.K_NEXT_ROUND ->
                 if (req.seat == 0 && g.overlay == TOverlay.RESULT) g.resultNext()
             ConnectProtocol.K_NEXT_GAME ->
-                if (req.seat == 0 && g.phase == Phase.GameOver) newGameFromHost()
+                // A game with a removed person cannot go on: the host ends it instead.
+                if (req.seat == 0 && g.phase == Phase.GameOver && roster.none { it.removed }) newGameFromHost()
+            K_REMOVE ->
+                if (req.seat == 0 && canRemove(req.i)) {
+                    val victim = playerOfSeat.getOrElse(req.i) { -1 }
+                    if (victim >= 0) {
+                        g.connectRemove(victim)
+                        // Flag the seat only if the engine really took the person out (the game may have moved on meanwhile).
+                        val done = g.phase == Phase.GameOver || (g.tournament && !g.active[victim])
+                        if (done) {
+                            markRemoved(req.i)
+                            broadcastLobby()
+                        }
+                    }
+                }
             else -> Unit
         }
+    }
+
+    /** Flags a seat as removed by the host. Its person is told so if they ever come back. */
+    private fun markRemoved(seat: Int) {
+        val at = roster.indexOfFirst { it.seat == seat }
+        if (at < 0) return
+        val e = roster[at]
+        roster[at] = RosterEntry(e.seat, e.name, e.deviceId, e.connected, e.isHost, e.out, true)
     }
 
     // ----- Phase 3: live view, host side -----
@@ -595,8 +998,9 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         while (evTimes.isNotEmpty() && now - evTimes.first() > 1000L) evTimes.removeFirst()
         if (droppable && evTimes.size >= MAX_EV_PER_SECOND) return
         evTimes.addLast(now)
-        if (seatByEndpoint.isEmpty()) return
-        manager.send(seatByEndpoint.keys.toList(), message)
+        val everyone = allEndpoints()
+        if (everyone.isEmpty()) return
+        manager.send(everyone, message)
     }
 
     /**
@@ -658,10 +1062,22 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      * every connection and clears the screen state. Safe to call at any time, also when idle.
      */
     fun leave() {
-        if (role == ConnectRole.HOST && seatByEndpoint.isNotEmpty()) {
-            manager.send(seatByEndpoint.keys.toList(), ConnectProtocol.bye("closed"))
-        } else if (role == ConnectRole.GUEST && state == ConnectState.GUEST_LOBBY) {
-            hostEndpoint?.let { manager.send(it, ConnectProtocol.bye("left")) }
+        when (role) {
+            ConnectRole.HOST -> {
+                if (started && game != null && !sessionEnded) {
+                    // Leaving a running game only pauses it: the guests wait, and it can be resumed later.
+                    // (persistHost drops the save instead when the game is already over.)
+                    persistHost()
+                } else if (!started && seatByEndpoint.isNotEmpty()) {
+                    manager.send(seatByEndpoint.keys.toList(), ConnectProtocol.bye("closed"))
+                }
+            }
+            ConnectRole.GUEST -> {
+                if (state == ConnectState.GUEST_LOBBY && link == LinkState.OK && finalText == null) {
+                    hostEndpoint?.let { manager.send(it, ConnectProtocol.bye("left")) }
+                }
+            }
+            null -> Unit
         }
         teardown()
         error = null
@@ -681,8 +1097,10 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         resetLive()
         helloTimers.clear()
         guestTimer = null
+        reconnectJob = null
         manager.stopAll()
         seatByEndpoint.clear()
+        watcherByEndpoint.clear()
         hostEndpoint = null
         started = false
         runnerJob?.cancel()
@@ -693,6 +1111,19 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         lastSent = ""
         lastSeq = 0
         appliedGameNo = 0
+        sessionEnded = false
+        lastEnded = null
+        lastWinner = ""
+        lastOutMask = 0
+        saveDirty = false
+        rejoining = false
+        helloRole = ConnectProtocol.ROLE_PLAYER
+        lastHeardAt = 0L
+        link = LinkState.OK
+        watching = false
+        allowWatchers = false
+        watcherCount = 0
+        finalText = null
         for (i in seatScores.indices) seatScores[i] = 0
         game = null
         inGame = false
@@ -716,11 +1147,22 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     // ----- Nearby events -----
 
     override fun onEndpointFound(endpointId: String, endpointName: String) {
-        if (role != ConnectRole.GUEST || state != ConnectState.SEARCHING) return
+        if (role != ConnectRole.GUEST) return
+        // Looking for the host again after the link dropped (the game stays on screen meanwhile).
+        val reconnecting = link == LinkState.RECONNECTING && state == ConnectState.GUEST_LOBBY && hostEndpoint == null
+        if (state != ConnectState.SEARCHING && !reconnecting) return
         val prefix = ConnectProtocol.endpointPrefix(roomCode)
         if (!endpointName.startsWith(prefix)) return
         val g = generation
         hostEndpoint = endpointId
+        if (reconnecting) {
+            attemptAt = SystemClock.elapsedRealtime()
+            manager.stopDiscovery()
+            manager.requestConnection(myName, endpointId) { problem ->
+                if (g == generation && problem != null && hostEndpoint == endpointId) hostEndpoint = null
+            }
+            return
+        }
         hostName = endpointName.substring(prefix.length).take(MAX_NAME)
         state = ConnectState.CONNECTING
         guestTimer?.cancel()
@@ -741,7 +1183,9 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
                 val g = generation
                 helloTimers[endpointId] = scope.launch {
                     delay(HELLO_TIMEOUT_MS)
-                    if (g == generation && !seatByEndpoint.containsKey(endpointId)) {
+                    if (g == generation && !seatByEndpoint.containsKey(endpointId) &&
+                        !watcherByEndpoint.containsKey(endpointId)
+                    ) {
                         manager.disconnect(endpointId)
                     }
                     helloTimers.remove(endpointId)
@@ -751,7 +1195,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
                 if (endpointId == hostEndpoint) {
                     manager.send(
                         endpointId,
-                        ConnectProtocol.hello(token, myName, deviceId, "player")
+                        ConnectProtocol.hello(token, myName, deviceId, helloRole)
                     )
                 }
             }
@@ -760,8 +1204,11 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     override fun onConnectionFailed(endpointId: String) {
-        if (role == ConnectRole.GUEST && endpointId == hostEndpoint && state == ConnectState.CONNECTING) {
+        if (role != ConnectRole.GUEST || endpointId != hostEndpoint) return
+        if (state == ConnectState.CONNECTING) {
             failJoin(MSG_CONNECT_FAILED)
+        } else if (link == LinkState.RECONNECTING) {
+            hostEndpoint = null   // this try failed: the loop makes the next one
         }
     }
 
@@ -771,9 +1218,9 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
             ConnectRole.GUEST -> {
                 if (endpointId != hostEndpoint) return
                 if (state == ConnectState.GUEST_LOBBY) {
-                    val message = if (inGame) MSG_HOST_LOST else MSG_HOST_GONE
-                    teardown()
-                    ended = message
+                    hostEndpoint = null
+                    if (link == LinkState.RECONNECTING) return   // the loop makes the next try
+                    onGuestLinkLost()
                 } else if (state == ConnectState.CONNECTING) {
                     failJoin(MSG_CONNECT_FAILED)
                 }
@@ -787,7 +1234,10 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         try {
             when (role) {
                 ConnectRole.HOST -> hostHandle(endpointId, msg)
-                ConnectRole.GUEST -> if (endpointId == hostEndpoint) guestHandle(msg)
+                ConnectRole.GUEST -> if (endpointId == hostEndpoint) {
+                    lastHeardAt = SystemClock.elapsedRealtime()
+                    guestHandle(msg)
+                }
                 null -> Unit
             }
         } catch (e: Exception) {
@@ -814,50 +1264,151 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     private fun hostHello(endpointId: String, msg: JSONObject) {
-        if (seatByEndpoint.containsKey(endpointId)) return // already seated: ignore a repeat
+        // Already in: ignore a repeat.
+        if (seatByEndpoint.containsKey(endpointId) || watcherByEndpoint.containsKey(endpointId)) return
         val sentToken = msg.optString("token", "")
-        val reason = when {
-            msg.optInt("v", -1) != ConnectProtocol.PROTOCOL_VERSION -> "version"
-            !sameText(sentToken, token) -> "bad_token"
-            msg.optString("role", "player") == "watcher" -> "watchers_off"
-            started -> "started"
-            freeSeat() < 0 -> "full"
-            else -> null
+        val sentDevice = msg.optString("deviceId", "")
+        val wantsToWatch = msg.optString("role", ConnectProtocol.ROLE_PLAYER) == ConnectProtocol.ROLE_WATCHER
+        if (msg.optInt("v", -1) != ConnectProtocol.PROTOCOL_VERSION) {
+            rejectAndClose(endpointId, "version")
+            return
         }
-        if (reason != null) {
-            manager.send(endpointId, ConnectProtocol.reject(reason))
-            // Give the reject a moment to arrive before the link is closed.
-            val g = generation
-            scope.launch {
-                delay(REJECT_CLOSE_DELAY_MS)
-                if (g == generation) manager.disconnect(endpointId)
-            }
+        if (!sameText(sentToken, token)) {
+            rejectAndClose(endpointId, "bad_token")
+            return
+        }
+        // The host is on its final "Game ended" panel: whoever comes back gets the same news.
+        val news = lastEnded
+        if (sessionEnded && news != null) {
+            manager.send(endpointId, news)
+            closeLater(endpointId)
             return
         }
         helloTimers.remove(endpointId)?.cancel()
+
+        // 1. A person who already owns a seat gets it back (matched by device id), whatever the switches say.
+        val owner = if (sentDevice.isEmpty()) null else roster.firstOrNull { !it.isHost && it.deviceId == sentDevice }
+        if (owner != null) {
+            if (owner.removed) {
+                manager.send(endpointId, ConnectProtocol.removed())
+                closeLater(endpointId)
+                return
+            }
+            attachSeat(endpointId, owner.seat)
+            return
+        }
+
+        // 2. Somebody without a seat, while a game runs, can only watch (and only if the host allows it).
+        if (started) {
+            if (!allowWatchers) {
+                rejectAndClose(endpointId, "watchers_off")
+                return
+            }
+            val sameWatcher = if (sentDevice.isEmpty()) null
+            else watcherByEndpoint.entries.firstOrNull { it.value == sentDevice }?.key
+            if (sameWatcher == null && watcherByEndpoint.size >= ConnectProtocol.MAX_WATCHERS) {
+                rejectAndClose(endpointId, "full")
+                return
+            }
+            if (sameWatcher != null) {
+                // The same phone again: keep the newest link, drop the older one quietly.
+                watcherByEndpoint.remove(sameWatcher)
+                manager.disconnect(sameWatcher)
+            }
+            watcherByEndpoint[endpointId] = sentDevice
+            watcherCount = watcherByEndpoint.size
+            sendWelcomeAndGame(endpointId, -1)
+            broadcastLobby()
+            return
+        }
+
+        // 3. In the lobby: watching is not possible yet, everybody else takes the next free seat.
+        if (wantsToWatch) {
+            rejectAndClose(endpointId, "watchers_off")
+            return
+        }
+        if (freeSeat() < 0) {
+            rejectAndClose(endpointId, "full")
+            return
+        }
         val seat = freeSeat()
         val name = uniqueName(cleanName(msg.optString("name", "")))
         seatByEndpoint[endpointId] = seat
-        val entry = RosterEntry(seat, name, msg.optString("deviceId", ""), true, false)
+        val entry = RosterEntry(seat, name, sentDevice, true, false)
         val at = roster.indexOfFirst { it.seat > seat }
         if (at < 0) roster.add(entry) else roster.add(at, entry)
+        sendWelcomeAndGame(endpointId, seat)
+        broadcastLobby()
+    }
+
+    /** Sends a refusal and closes the link a moment later, so the refusal has time to arrive. */
+    private fun rejectAndClose(endpointId: String, reason: String) {
+        manager.send(endpointId, ConnectProtocol.reject(reason))
+        closeLater(endpointId)
+    }
+
+    private fun closeLater(endpointId: String) {
+        val g = generation
+        scope.launch {
+            delay(REJECT_CLOSE_DELAY_MS)
+            if (g == generation) manager.disconnect(endpointId)
+        }
+    }
+
+    /**
+     * Puts a connection on a seat that already exists (a person coming back). A seat keeps only its newest
+     * connection: the older one is taken off the map first, so its later disconnect is not mistaken for a drop.
+     */
+    private fun attachSeat(endpointId: String, seat: Int) {
+        val older = seatByEndpoint.entries.filter { it.value == seat }.map { it.key }
+        for (o in older) {
+            seatByEndpoint.remove(o)
+            manager.disconnect(o)
+        }
+        seatByEndpoint[endpointId] = seat
+        val at = roster.indexOfFirst { it.seat == seat }
+        if (at >= 0) {
+            val e = roster[at]
+            roster[at] = RosterEntry(e.seat, e.name, e.deviceId, true, e.isHost, e.out, e.removed)
+        }
+        sendWelcomeAndGame(endpointId, seat)
+        broadcastLobby()
+    }
+
+    /** The answer to an accepted hello. In a running game the assignment and the whole game state follow at once. */
+    private fun sendWelcomeAndGame(endpointId: String, seat: Int) {
         manager.send(
             endpointId,
-            ConnectProtocol.welcome(seat, roomCode, hostName, playerCount, roster.toList())
+            ConnectProtocol.welcome(
+                seat, roomCode, hostName, playerCount, rosterForSend(),
+                started, seat < 0, watcherByEndpoint.size, allowWatchers
+            )
         )
-        broadcastLobby()
+        if (started) {
+            val order = playerOfSeat.toList()
+            val assignment = order.indices.map { s ->
+                SeatAssignment(s, order[s], colorsOfSeat(s).map { it.name })
+            }
+            manager.send(endpointId, ConnectProtocol.start(playerCount, assignment, gameNo))
+            hostResync(endpointId)
+        }
     }
 
     private fun hostDropEndpoint(endpointId: String) {
         helloTimers.remove(endpointId)?.cancel()
+        if (watcherByEndpoint.remove(endpointId) != null) {
+            watcherCount = watcherByEndpoint.size
+            broadcastLobby()
+            return
+        }
         val seat = seatByEndpoint.remove(endpointId) ?: return
         val at = roster.indexOfFirst { it.seat == seat }
         if (started) {
             // In a game the seat stays (its colours stay too); it is only marked as not connected, and
-            // everybody sees "Waiting for ... to reconnect...". Coming back is a later phase.
+            // everybody sees "Waiting for ... to reconnect...". The person takes it back when they return.
             if (at >= 0) {
                 val e = roster[at]
-                roster[at] = RosterEntry(e.seat, e.name, e.deviceId, false, e.isHost)
+                roster[at] = RosterEntry(e.seat, e.name, e.deviceId, false, e.isHost, e.out, e.removed)
             }
         } else if (at >= 0) {
             roster.removeAt(at)
@@ -867,9 +1418,17 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
 
     private fun broadcastLobby() {
         manager.send(
-            seatByEndpoint.keys.toList(),
-            ConnectProtocol.lobby(playerCount, started, roster.toList())
+            allEndpoints(),
+            ConnectProtocol.lobby(playerCount, started, rosterForSend(), watcherByEndpoint.size, allowWatchers)
         )
+    }
+
+    /** Every phone that is connected: seated players and watchers. */
+    private fun allEndpoints(): List<String> = seatByEndpoint.keys.toList() + watcherByEndpoint.keys.toList()
+
+    /** The seat list as it goes over the air, with the out flag worked out from the game. */
+    private fun rosterForSend(): List<RosterEntry> = roster.map { e ->
+        RosterEntry(e.seat, e.name, e.deviceId, e.connected, e.isHost, isSeatOut(e.seat), e.removed)
     }
 
     private fun freeSeat(): Int {
@@ -899,30 +1458,144 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
             ConnectProtocol.T_WELCOME -> {
                 val seat = msg.optInt("seat", -1)
                 val count = msg.optInt("playerCount", 0)
-                if (seat < 1 || count !in 2..4) return
+                val isWatcher = seat < 0 || msg.optBoolean("watcher", false)
+                if (count !in 2..4 || (!isWatcher && seat < 1)) return
                 guestTimer?.cancel()
+                reconnectJob?.cancel()
+                reconnectJob = null
+                manager.stopDiscovery()
                 playerCount = count
-                mySeat = seat
+                mySeat = if (isWatcher) -1 else seat
+                watching = isWatcher
                 hostName = cleanName(msg.optString("hostName", hostName))
                 setRoster(ConnectProtocol.rosterFromJson(msg.optJSONArray("roster")))
+                watcherCount = msg.optInt("watchers", 0)
+                link = LinkState.OK
+                lastHeardAt = SystemClock.elapsedRealtime()
                 state = ConnectState.GUEST_LOBBY
+                saveLastSession(mySeat, isWatcher)
             }
             ConnectProtocol.T_LOBBY -> {
                 if (state != ConnectState.GUEST_LOBBY) return
                 val count = msg.optInt("playerCount", playerCount)
                 if (count in 2..4) playerCount = count
                 setRoster(ConnectProtocol.rosterFromJson(msg.optJSONArray("roster")))
+                watcherCount = msg.optInt("watchers", watcherCount)
             }
             ConnectProtocol.T_START -> guestStart(msg)
             ConnectProtocol.T_STATE -> guestState(msg)
             ConnectProtocol.T_EV -> guestEvent(msg)
-            ConnectProtocol.T_REJECT -> failJoin(rejectMessage(msg.optString("reason", "")))
+            ConnectProtocol.T_REJECT -> {
+                val reason = msg.optString("reason", "")
+                val text = rejectMessage(reason)
+                // These answers mean the way back is closed for good: forget the remembered game.
+                val closed = reason == "bad_token" || reason == "started" || reason == "watchers_off" || reason == "version"
+                if (closed && (rejoining || inGame)) clearLastSession()
+                if (inGame) showFinal(text) else failJoin(text)
+            }
+            ConnectProtocol.T_ENDED -> {
+                val (names, scores) = ConnectProtocol.endedScoresFromJson(msg.optJSONArray("scores"))
+                val text = endedText(msg.optString("winnerName", ""), names, scores)
+                clearLastSession()
+                if (inGame) {
+                    showFinal(text)
+                } else {
+                    teardown()
+                    ended = text
+                }
+            }
+            ConnectProtocol.T_REMOVED -> {
+                clearLastSession()
+                if (inGame) {
+                    showFinal(MSG_REMOVED)
+                } else {
+                    teardown()
+                    ended = MSG_REMOVED
+                }
+            }
             ConnectProtocol.T_BYE -> {
+                clearLastSession()
                 val message = if (inGame) MSG_GAME_ENDED else MSG_HOST_GONE
                 teardown()
                 ended = message
             }
             else -> Unit // unknown type: ignore
+        }
+    }
+
+    /**
+     * Guest: the session is over for this person. The game stays on screen under [text] and one OK button;
+     * the link is closed and nothing tries to reconnect any more.
+     */
+    private fun showFinal(text: String) {
+        reconnectJob?.cancel()
+        reconnectJob = null
+        guestTimer?.cancel()
+        manager.stopDiscovery()
+        hostEndpoint?.let { manager.disconnect(it) }
+        hostEndpoint = null
+        link = LinkState.OK
+        finalText = text
+    }
+
+    /** The host's phone cannot be reached any more while a game is on screen: look for it again by itself. */
+    private fun onGuestLinkLost() {
+        if (role != ConnectRole.GUEST || state != ConnectState.GUEST_LOBBY || finalText != null) return
+        if (!inGame) {
+            teardown()
+            ended = MSG_HOST_GONE
+            return
+        }
+        if (link == LinkState.RECONNECTING) return
+        link = LinkState.RECONNECTING
+        runReconnectLoop()
+    }
+
+    /** Looks for the host again every few seconds for up to [RECONNECT_TIMEOUT_MS], then offers Try again. */
+    private fun runReconnectLoop() {
+        reconnectJob?.cancel()
+        val g = generation
+        hostEndpoint?.let { manager.disconnect(it) }
+        hostEndpoint = null
+        attemptAt = 0L
+        reconnectJob = scope.launch {
+            val deadline = SystemClock.elapsedRealtime() + RECONNECT_TIMEOUT_MS
+            while (g == generation && link == LinkState.RECONNECTING && SystemClock.elapsedRealtime() < deadline) {
+                val ep = hostEndpoint
+                if (ep != null && SystemClock.elapsedRealtime() - attemptAt > ATTEMPT_TIMEOUT_MS) {
+                    manager.disconnect(ep)
+                    hostEndpoint = null
+                }
+                if (hostEndpoint == null) {
+                    manager.stopDiscovery()
+                    manager.startDiscovery { }
+                }
+                delay(RECONNECT_STEP_MS)
+            }
+            if (g == generation && link == LinkState.RECONNECTING) {
+                manager.stopDiscovery()
+                hostEndpoint?.let { manager.disconnect(it) }
+                hostEndpoint = null
+                link = LinkState.FAILED
+            }
+        }
+    }
+
+    /** The app came back and thinks it is connected: ask the host for the game, and look again if nothing answers. */
+    private fun checkLink() {
+        val ep = hostEndpoint
+        if (ep == null) {
+            onGuestLinkLost()
+            return
+        }
+        val before = lastHeardAt
+        val g = generation
+        manager.send(ep, ConnectProtocol.resync())
+        scope.launch {
+            delay(CHECK_REPLY_MS)
+            if (g == generation && link == LinkState.OK && inGame && lastHeardAt == before) {
+                onGuestLinkLost()
+            }
         }
     }
 
@@ -949,6 +1622,9 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         for (p in order) playerOfSeat.add(p)
         gameNo = no
         resetLive()
+        // A host that resumed a saved game counts its snapshots from 1 again.
+        lastSeq = 0
+        appliedGameNo = 0
         game = LudoGame(tournament = n >= 3, connectActive = order.toList())
         inGame = true
         // The first state normally follows at once; if it never comes, ask for it.
@@ -1156,6 +1832,125 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         }
     }
 
+    // ----- Phase 4: remembered sessions -----
+
+    private class SavedSession(val room: String, val token: String, val hostName: String, val watcher: Boolean)
+
+    private fun readSavedSession(): SavedSession? {
+        val text = prefs.getString(KEY_LAST_SESSION, null) ?: return null
+        return try {
+            val o = JSONObject(text)
+            val room = o.getString("room")
+            val tok = o.getString("token")
+            if (JoinTicket.parse(JoinTicket(room, tok).toText()) == null) return null
+            SavedSession(room, tok, o.optString("hostName", "Host"), o.optBoolean("watcher", false))
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Guest: remembers the game so the Rejoin button can bring this person back. */
+    private fun saveLastSession(seat: Int, watcher: Boolean) {
+        try {
+            val o = JSONObject()
+                .put("room", roomCode)
+                .put("token", token)
+                .put("hostName", hostName)
+                .put("seat", seat)
+                .put("watcher", watcher)
+                .put("role", if (watcher) ConnectProtocol.ROLE_WATCHER else ConnectProtocol.ROLE_PLAYER)
+                .put("time", System.currentTimeMillis())
+            prefs.edit().putString(KEY_LAST_SESSION, o.toString()).apply()
+            rejoinInfo = RejoinInfo(roomCode, hostName, watcher)
+        } catch (e: Exception) {
+            // Not being able to remember the game only costs the Rejoin button.
+        }
+    }
+
+    private fun clearLastSession() {
+        prefs.edit().remove(KEY_LAST_SESSION).apply()
+        rejoinInfo = null
+    }
+
+    private fun readHostSaveInfo(): HostSaveInfo? {
+        val text = prefs.getString(KEY_HOST_SAVE, null) ?: return null
+        return try {
+            val o = JSONObject(text)
+            val count = o.getInt("playerCount")
+            if (count !in 2..4) return null
+            HostSaveInfo(o.getString("room"), count)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun clearHostSave() {
+        prefs.edit().remove(KEY_HOST_SAVE).apply()
+        hostSaveInfo = null
+        saveDirty = false
+    }
+
+    /** Saves the running game now if it changed (or [force]); at most about every two seconds otherwise. */
+    private fun maybeSave(force: Boolean) {
+        if (role != ConnectRole.HOST || !started || sessionEnded || game == null) return
+        val now = SystemClock.elapsedRealtime()
+        if (!force && (!saveDirty || now - lastSaveAt < SAVE_INTERVAL_MS)) return
+        persistHost()
+    }
+
+    /** Writes everything needed to resume the hosted game. A finished game is not kept. */
+    private fun persistHost() {
+        val g = game ?: return
+        if (role != ConnectRole.HOST || !started || sessionEnded) return
+        if (g.phase == Phase.GameOver) {
+            clearHostSave()
+            return
+        }
+        try {
+            val o = JSONObject()
+                .put("playerCount", playerCount)
+                .put("room", roomCode)
+                .put("token", token)
+                .put("gameNo", gameNo)
+                .put("allowWatchers", allowWatchers)
+                .put("lastWinner", lastWinner)
+                .put("order", JSONArray().also { a -> playerOfSeat.forEach { a.put(it) } })
+                .put("scores", JSONArray().also { a ->
+                    for (seat in 0 until 4) {
+                        val p = playerOfSeat.getOrElse(seat) { -1 }
+                        a.put(if (p < 0) 0 else g.scores.getOrElse(p) { 0 })
+                    }
+                })
+                .put("roster", JSONArray().also { a ->
+                    for (e in roster) {
+                        a.put(
+                            JSONObject().put("seat", e.seat).put("name", e.name)
+                                .put("deviceId", e.deviceId).put("removed", e.removed)
+                        )
+                    }
+                })
+                .put("engine", g.toSaveString())
+                .put("time", System.currentTimeMillis())
+            prefs.edit().putString(KEY_HOST_SAVE, o.toString()).apply()
+            hostSaveInfo = HostSaveInfo(roomCode, playerCount)
+            saveDirty = false
+            lastSaveAt = SystemClock.elapsedRealtime()
+        } catch (e: Exception) {
+            // A failed save only costs the Resume button.
+        }
+    }
+
+    /** The "Game ended" panel text: the winner of the last finished game (if any) and the scores. */
+    private fun endedText(winner: String, names: List<String>, scores: List<Int>): String {
+        val sb = StringBuilder("Game ended")
+        if (winner.isNotEmpty()) sb.append("\nWinner: ").append(winner)
+        if (names.isNotEmpty()) {
+            sb.append("\n")
+            sb.append(names.indices.joinToString("   ") { "${names[it]} ${scores.getOrElse(it) { 0 }}" })
+        }
+        return sb.toString()
+    }
+
     private fun setRoster(list: List<RosterEntry>) {
         roster.clear()
         roster.addAll(list.sortedBy { it.seat })
@@ -1215,6 +2010,18 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
 
     companion object {
         const val KEY_DEVICE_ID = "connect_device_id"
+        const val KEY_LAST_SESSION = "connect_last_session"
+        const val KEY_HOST_SAVE = "connect_host_save"
+
+        /** Host-only work item: take a person out of the game (never sent over the air). */
+        private const val K_REMOVE = "remove"
+
+        /** Phase 4: how long a guest keeps looking for the host before it offers Try again. */
+        private const val RECONNECT_TIMEOUT_MS = 30_000L
+        private const val RECONNECT_STEP_MS = 2_000L
+        private const val ATTEMPT_TIMEOUT_MS = 8_000L
+        private const val CHECK_REPLY_MS = 3_000L
+        private const val SAVE_INTERVAL_MS = 2_000L
 
         /** Display names are cut to this many characters. */
         const val MAX_NAME = 14
@@ -1259,5 +2066,8 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         private const val MSG_HOST_GONE = "Disconnected from the host."
         private const val MSG_HOST_LOST = "Lost the connection to the host."
         private const val MSG_GAME_ENDED = "The host ended the game."
+        private const val MSG_GAME_NOT_FOUND = "Game not found. The host may have left."
+        private const val MSG_REMOVED = "You were removed by the host."
+        private const val MSG_RESUME_FAILED = "Couldn't resume the game."
     }
 }

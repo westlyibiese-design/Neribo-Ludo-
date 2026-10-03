@@ -62,7 +62,9 @@ import com.journeyapps.barcodescanner.ScanOptions
 import com.westly.ludo.R
 import com.westly.ludo.connect.ConnectSession
 import com.westly.ludo.connect.ConnectState
+import com.westly.ludo.connect.HostSaveInfo
 import com.westly.ludo.connect.JoinTicket
+import com.westly.ludo.connect.RejoinInfo
 import com.westly.ludo.connect.renderQr
 import com.westly.ludo.game.PlayerNames
 
@@ -154,9 +156,34 @@ fun ConnectMenuScreen(onBack: () -> Unit, onOffline: () -> Unit) {
 
 /** Offline: host a game or join one. */
 @Composable
-fun ConnectOfflineScreen(onBack: () -> Unit, onHost: () -> Unit, onJoin: () -> Unit, notice: String? = null) {
+fun ConnectOfflineScreen(
+    onBack: () -> Unit,
+    onHost: () -> Unit,
+    onJoin: () -> Unit,
+    notice: String? = null,
+    /** A game this phone left (or lost) and can return to: shows the Rejoin button. */
+    rejoin: RejoinInfo? = null,
+    onRejoin: () -> Unit = {},
+    /** A hosted game that was paused (the app was closed): shows the Resume button. */
+    resume: HostSaveInfo? = null,
+    onResume: () -> Unit = {}
+) {
     ConnectFrame("Offline", 56f, onBack) { u ->
-        Spacer(Modifier.height(u * 8f))
+        Spacer(Modifier.height(u * 6f))
+        if (resume != null) {
+            GlossButton(
+                "Resume hosted game", Palette.Orange, u * 78f, u * 16f,
+                subtitle = "Room ${resume.room}, ${resume.playerCount} players", onClick = onResume
+            )
+            Spacer(Modifier.height(u * 3f))
+        }
+        if (rejoin != null) {
+            GlossButton(
+                "Rejoin ${rejoin.hostName}'s game", Palette.Orange, u * 78f, u * 16f,
+                subtitle = if (rejoin.watcher) "Back to watching" else "Back to your seat", onClick = onRejoin
+            )
+            Spacer(Modifier.height(u * 3f))
+        }
         GlossButton("Host a Game", Palette.Green, u * 78f, u * 18f, subtitle = "Show a QR code", onClick = onHost)
         Spacer(Modifier.height(u * 4f))
         GlossButton("Join a Game", Palette.Blue, u * 78f, u * 18f, subtitle = "Scan a QR code", onClick = onJoin)
@@ -426,7 +453,7 @@ private fun SeatList(session: ConnectSession, u: Dp) {
 
 /** A message box over the screen with one or two buttons. Taps behind it are blocked. */
 @Composable
-private fun ConnectDialog(
+internal fun ConnectDialog(
     message: String,
     primaryLabel: String,
     onPrimary: () -> Unit,
@@ -536,7 +563,14 @@ private fun HostLobby(session: ConnectSession, names: PlayerNames, count: Int, o
                 )
                 Spacer(Modifier.height(u * 1.5f))
                 SeatList(session, u)
-                Spacer(Modifier.height(u * 3f))
+                Spacer(Modifier.height(u * 2.5f))
+                GlossButton(
+                    if (session.allowWatchers) "Allow watchers: On" else "Allow watchers: Off",
+                    if (session.allowWatchers) Palette.Green else Palette.Orange,
+                    u * 60f, u * 9f,
+                    onClick = { session.setAllowWatchers(!session.allowWatchers) }
+                )
+                Spacer(Modifier.height(u * 2.5f))
                 val enabled = session.isFull
                 // Start opens the real game on every phone; the app then moves on to the game screen by itself.
                 val startAction: () -> Unit = { session.requestStart() }
@@ -567,14 +601,15 @@ private fun HostLobby(session: ConnectSession, names: PlayerNames, count: Int, o
 
 /** Guest: checks the prerequisites (including the camera), scans the QR code, connects and shows the lobby. */
 @Composable
-fun ConnectJoinScreen(session: ConnectSession, names: PlayerNames, onClose: () -> Unit) {
-    PrerequisiteGate(needCamera = true, title = "Join", onBack = onClose) {
-        JoinFlow(session, names, onClose)
+fun ConnectJoinScreen(session: ConnectSession, names: PlayerNames, onClose: () -> Unit, rejoin: Boolean = false) {
+    // Returning to a remembered game needs no camera.
+    PrerequisiteGate(needCamera = !rejoin, title = if (rejoin) "Rejoin" else "Join", onBack = onClose) {
+        JoinFlow(session, names, onClose, rejoin)
     }
 }
 
 @Composable
-private fun JoinFlow(session: ConnectSession, names: PlayerNames, onClose: () -> Unit) {
+private fun JoinFlow(session: ConnectSession, names: PlayerNames, onClose: () -> Unit, rejoin: Boolean) {
     var scanMessage by remember { mutableStateOf<String?>(null) }
     var autoOpened by remember { mutableStateOf(false) }
 
@@ -600,11 +635,11 @@ private fun JoinFlow(session: ConnectSession, names: PlayerNames, onClose: () ->
         scanLauncher.launch(options)
     }
 
-    // Open the camera by itself the first time, so joining is one tap less.
+    // Open the camera by itself the first time, so joining is one tap less. A rejoin goes straight back instead.
     LaunchedEffect(Unit) {
         if (!autoOpened && session.state == ConnectState.IDLE && session.error == null && session.ended == null) {
             autoOpened = true
-            openScanner()
+            if (rejoin) session.startRejoin(names[0]) else openScanner()
         }
     }
 
@@ -627,13 +662,24 @@ private fun JoinFlow(session: ConnectSession, names: PlayerNames, onClose: () ->
             Spacer(Modifier.height(u * 10f))
             InfoText(problem, u)
             Spacer(Modifier.height(u * 8f))
-            GlossButton(
-                "Try again", Palette.Green, u * 60f, u * 14f,
-                onClick = {
-                    session.clearNotices()
-                    openScanner()
-                }
-            )
+            // A rejoin with nothing left to rejoin has no use for Try again.
+            if (rejoin && session.rejoinInfo == null) {
+                GlossButton(
+                    "OK", Palette.Green, u * 50f, u * 14f,
+                    onClick = {
+                        session.clearNotices()
+                        onClose()
+                    }
+                )
+            } else {
+                GlossButton(
+                    "Try again", Palette.Green, u * 60f, u * 14f,
+                    onClick = {
+                        session.clearNotices()
+                        if (rejoin) session.startRejoin(names[0]) else openScanner()
+                    }
+                )
+            }
         }
         session.state == ConnectState.SEARCHING -> ConnectFrame("Join", 56f, onClose) { u ->
             Spacer(Modifier.height(u * 10f))
@@ -665,6 +711,108 @@ private fun JoinFlow(session: ConnectSession, names: PlayerNames, onClose: () ->
             InfoText(scanMessage ?: "Scan the host's QR code to join.", u)
             Spacer(Modifier.height(u * 8f))
             GlossButton("Scan QR code", Palette.Green, u * 66f, u * 14f, onClick = { openScanner() })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: resume, banners and dialogs shown over the game
+// ---------------------------------------------------------------------------
+
+/** Host: checks the prerequisites, then resumes the saved game (same room, same QR code). */
+@Composable
+fun ConnectResumeScreen(session: ConnectSession, names: PlayerNames, onClose: () -> Unit) {
+    PrerequisiteGate(needCamera = false, title = "Resume", onBack = onClose) {
+        var tried by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            if (!tried && session.state == ConnectState.IDLE && session.error == null) {
+                tried = true
+                session.resumeHosting(names[0])
+            }
+        }
+        ConnectFrame("Resume", 56f, onClose) { u ->
+            Spacer(Modifier.height(u * 10f))
+            val problem = session.error
+            if (problem != null) {
+                InfoText(problem, u)
+                Spacer(Modifier.height(u * 8f))
+                GlossButton(
+                    "OK", Palette.Green, u * 50f, u * 14f,
+                    onClick = {
+                        session.clearNotices()
+                        onClose()
+                    }
+                )
+            } else {
+                InfoText("Opening the game again...", u)
+            }
+        }
+    }
+}
+
+/**
+ * The line over the board while a phone is missing: "Waiting for Joy to reconnect...". On the host it also
+ * carries a Remove player button (only when [canRemove], i.e. the connection of that person is really lost).
+ */
+@Composable
+fun ConnectWaitBanner(text: String, canRemove: Boolean, onRemove: () -> Unit, u: Dp, modifier: Modifier = Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        ConnectNotice(text, u)
+        if (canRemove) {
+            Spacer(Modifier.height(u * 1.2f))
+            GlossButton("Remove player", Palette.Red, u * 40f, u * 8f, onClick = onRemove)
+        }
+    }
+}
+
+/** Host: the QR code again during the game, so latecomers and returning people can scan it. */
+@Composable
+fun ConnectQrDialog(ticketText: String, watching: Int, allowWatchers: Boolean, onClose: () -> Unit) {
+    val qr = remember(ticketText) {
+        runCatching { renderQr(ticketText, 640).asImageBitmap() }.getOrNull()
+    }
+    val source = remember { MutableInteractionSource() }
+    BackHandler(true) { onClose() }
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.62f))
+            .clickable(interactionSource = source, indication = null) { },
+        contentAlignment = Alignment.Center
+    ) {
+        val u = minOf(maxWidth / 100f, maxHeight / 170f)
+        val shape = RoundedCornerShape(u * 5f)
+        Column(
+            Modifier
+                .width(u * 86f)
+                .background(Brush.verticalGradient(listOf(Palette.PillLight, Palette.PillDark)), shape)
+                .border(u * 0.5f, Palette.PillEdge, shape)
+                .padding(u * 5f),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                Modifier.background(Color.White, RoundedCornerShape(u * 2f)).padding(u * 1.5f),
+                contentAlignment = Alignment.Center
+            ) {
+                if (qr != null) {
+                    Image(
+                        bitmap = qr,
+                        contentDescription = "QR code to join this game",
+                        modifier = Modifier.size(u * 52f),
+                        filterQuality = FilterQuality.None
+                    )
+                } else {
+                    Spacer(Modifier.size(u * 52f))
+                }
+            }
+            Spacer(Modifier.height(u * 2.5f))
+            BasicText(
+                if (allowWatchers) "Watchers allowed. Watching: $watching" else "Watchers are off. Watching: $watching",
+                style = menuText((u * 3.6f).sp()),
+                maxLines = 2
+            )
+            Spacer(Modifier.height(u * 3f))
+            GlossButton("Close", Palette.Green, u * 52f, u * 12f, onClick = onClose)
         }
     }
 }

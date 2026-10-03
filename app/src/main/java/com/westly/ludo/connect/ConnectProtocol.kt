@@ -6,16 +6,21 @@ import com.westly.ludo.game.LudoColor
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Who this phone is in a Connect and Play room. Watchers arrive in a later phase. */
+/** Who this phone is in a Connect and Play room. A watcher is a guest without a seat (see ConnectSession.watching). */
 enum class ConnectRole { HOST, GUEST }
 
-/** One person in the room. [deviceId] is only known to the host (it is never sent over the air). */
+/**
+ * One person in the room. [deviceId] is only known to the host (it is never sent over the air).
+ * [out] = knocked out of the tournament (still watching), [removed] = taken out of the game by the host.
+ */
 class RosterEntry(
     val seat: Int,
     val name: String,
     val deviceId: String,
     val connected: Boolean,
-    val isHost: Boolean = false
+    val isHost: Boolean = false,
+    val out: Boolean = false,
+    val removed: Boolean = false
 )
 
 /** One seat's share of a new game: which engine player it plays and with which colours. */
@@ -75,6 +80,14 @@ object ConnectProtocol {
     const val T_REJECT = "reject"
     const val T_BYE = "bye"
 
+    // Phase 4: leave and return.
+    const val T_ENDED = "ended"
+    const val T_REMOVED = "removed"
+
+    /** The two roles a "hello" can ask for. */
+    const val ROLE_PLAYER = "player"
+    const val ROLE_WATCHER = "watcher"
+
     // Phase 2: the shared game.
     const val T_START = "start"
     const val T_STATE = "state"
@@ -109,19 +122,68 @@ object ConnectProtocol {
     fun hello(token: String, name: String, deviceId: String, role: String): JSONObject =
         base(T_HELLO).put("token", token).put("name", name).put("deviceId", deviceId).put("role", role)
 
-    fun welcome(seat: Int, roomCode: String, hostName: String, playerCount: Int, roster: List<RosterEntry>): JSONObject =
+    /** [seat] is -1 for a watcher. [started] says a game is running (the "start" and a "state" follow). */
+    fun welcome(
+        seat: Int,
+        roomCode: String,
+        hostName: String,
+        playerCount: Int,
+        roster: List<RosterEntry>,
+        started: Boolean = false,
+        watcher: Boolean = false,
+        watchers: Int = 0,
+        allowWatchers: Boolean = false
+    ): JSONObject =
         base(T_WELCOME)
             .put("seat", seat)
             .put("roomCode", roomCode)
             .put("hostName", hostName)
             .put("playerCount", playerCount)
             .put("roster", rosterToJson(roster))
+            .put("started", started)
+            .put("watcher", watcher)
+            .put("watchers", watchers)
+            .put("allowWatchers", allowWatchers)
 
-    fun lobby(playerCount: Int, started: Boolean, roster: List<RosterEntry>): JSONObject =
+    fun lobby(
+        playerCount: Int,
+        started: Boolean,
+        roster: List<RosterEntry>,
+        watchers: Int = 0,
+        allowWatchers: Boolean = false
+    ): JSONObject =
         base(T_LOBBY)
             .put("playerCount", playerCount)
             .put("started", started)
             .put("roster", rosterToJson(roster))
+            .put("watchers", watchers)
+            .put("allowWatchers", allowWatchers)
+
+    /** Host -> everybody: the host ended the session. [names] and [scores] are in seat order. */
+    fun ended(winnerName: String, names: List<String>, scores: List<Int>): JSONObject {
+        val arr = JSONArray()
+        for (i in names.indices) {
+            arr.put(JSONObject().put("name", names[i]).put("score", scores.getOrElse(i) { 0 }))
+        }
+        return base(T_ENDED).put("reason", "host_ended").put("winnerName", winnerName).put("scores", arr)
+    }
+
+    /** Host -> one guest: the host took this person out of the game. */
+    fun removed(): JSONObject = base(T_REMOVED)
+
+    /** Reads the "scores" list of an "ended" message: names and scores in seat order. Bad entries are skipped. */
+    fun endedScoresFromJson(arr: JSONArray?): Pair<List<String>, List<Int>> {
+        val names = ArrayList<String>()
+        val scores = ArrayList<Int>()
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                names.add(o.optString("name", "Player"))
+                scores.add(o.optInt("score", 0))
+            }
+        }
+        return Pair(names, scores)
+    }
 
     fun reject(reason: String): JSONObject = base(T_REJECT).put("reason", reason)
 
@@ -225,6 +287,8 @@ object ConnectProtocol {
                     .put("name", e.name)
                     .put("connected", e.connected)
                     .put("isHost", e.isHost)
+                    .put("out", e.out)
+                    .put("removed", e.removed)
             )
         }
         return arr
@@ -244,7 +308,9 @@ object ConnectProtocol {
                     name = o.optString("name", "Player"),
                     deviceId = "",
                     connected = o.optBoolean("connected", true),
-                    isHost = o.optBoolean("isHost", false)
+                    isHost = o.optBoolean("isHost", false),
+                    out = o.optBoolean("out", false),
+                    removed = o.optBoolean("removed", false)
                 )
             )
         }
