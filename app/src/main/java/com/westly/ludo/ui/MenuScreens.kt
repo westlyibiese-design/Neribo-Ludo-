@@ -79,9 +79,9 @@ import kotlin.math.sin
 // Ludo Mate home, Settings (visual only) and Game Mode screens.
 
 @Composable
-private fun Dp.sp(): TextUnit = with(LocalDensity.current) { this@sp.toSp() }
+internal fun Dp.sp(): TextUnit = with(LocalDensity.current) { this@sp.toSp() }
 
-private fun menuText(size: TextUnit, color: Color = Color.White) = TextStyle(
+internal fun menuText(size: TextUnit, color: Color = Color.White) = TextStyle(
     color = color,
     fontSize = size,
     fontWeight = FontWeight.ExtraBold,
@@ -90,7 +90,7 @@ private fun menuText(size: TextUnit, color: Color = Color.White) = TextStyle(
 )
 
 @Composable
-private fun MenuBackground(image: Int, content: @Composable () -> Unit) {
+internal fun MenuBackground(image: Int, content: @Composable () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
@@ -109,7 +109,7 @@ private fun MenuBackground(image: Int, content: @Composable () -> Unit) {
 
 /** Big glossy rounded button. [onClick] null = shown but inactive. */
 @Composable
-private fun GlossButton(
+internal fun GlossButton(
     text: String,
     swatch: Swatch,
     width: Dp,
@@ -676,7 +676,8 @@ fun GameModeScreen(
     onYouAndComputer: () -> Unit,
     onTournament: () -> Unit,
     onFamily: () -> Unit = {},
-    familyActive: Boolean = false
+    familyActive: Boolean = false,
+    onConnect: () -> Unit = {}
 ) {
     MenuBackground(R.drawable.bg_modes) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -709,7 +710,7 @@ fun GameModeScreen(
                     subtitle = if (familyActive) "Resume game" else "2, 3 or 4 players", onClick = onFamily
                 )
                 Spacer(Modifier.height(u * 4f))
-                GlossButton("Connect and Play", Palette.Red, u * 78f, u * 18f, subtitle = "Coming soon", dimmed = true)
+                GlossButton("Connect and Play", Palette.Red, u * 78f, u * 18f, subtitle = "Nearby phones", onClick = onConnect)
             }
         }
     }

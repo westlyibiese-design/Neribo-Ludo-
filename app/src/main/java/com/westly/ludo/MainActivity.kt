@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.westly.ludo.connect.ConnectSession
 import com.westly.ludo.game.LudoGame
 import com.westly.ludo.game.GameSettings
 import com.westly.ludo.game.Phase
@@ -59,6 +60,11 @@ import com.westly.ludo.game.TOverlay
 import com.westly.ludo.ui.BoardThemes
 import com.westly.ludo.ui.ChangeNamesDialog
 import com.westly.ludo.ui.ConfigurationScreen
+import com.westly.ludo.ui.ConnectCountScreen
+import com.westly.ludo.ui.ConnectHostScreen
+import com.westly.ludo.ui.ConnectJoinScreen
+import com.westly.ludo.ui.ConnectMenuScreen
+import com.westly.ludo.ui.ConnectOfflineScreen
 import com.westly.ludo.ui.CounterOrb
 import com.westly.ludo.ui.ExitButton
 import com.westly.ludo.ui.FamilyCountScreen
@@ -111,6 +117,9 @@ class MainActivity : ComponentActivity() {
     // Board type, computer speed and computer level, saved on this phone.
     private val settings by lazy { GameSettings(prefs()) }
 
+    // Connect and Play (nearby phones). Owned here, not by a screen, so moving between screens keeps the link.
+    private val connect by lazy { ConnectSession(applicationContext, prefs()) }
+
     private fun saveGame() {
         prefs().edit()
             .putString("save", game.toSaveString())
@@ -139,6 +148,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             LudoApp(
                 game, tournament, names, settings,
+                connect = connect,
                 familyGame = family,
                 onFamilyCreate = { count, list ->
                     family = LudoGame(tournament = count >= 3, familyPlayers = count).also { it.setFamilyNames(list) }
@@ -161,6 +171,12 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         saveGame()
     }
+
+    override fun onDestroy() {
+        // Stop advertising / searching and close every nearby connection.
+        connect.release()
+        super.onDestroy()
+    }
 }
 
 /** Intro -> home -> settings / game modes -> the chosen game. */
@@ -170,6 +186,7 @@ fun LudoApp(
     tournament: LudoGame,
     names: PlayerNames,
     settings: GameSettings,
+    connect: ConnectSession,
     familyGame: LudoGame? = null,
     onFamilyCreate: (Int, List<String>) -> Unit = { _, _ -> },
     onFamilyEnd: () -> Unit = {}
@@ -179,11 +196,21 @@ fun LudoApp(
     var screen by rememberSaveable { mutableStateOf("intro") }
     // How many people the Family players picked (used while typing their names).
     var familyCount by rememberSaveable { mutableStateOf(2) }
+    // How many players the Connect and Play host picked.
+    var connectCount by rememberSaveable { mutableStateOf(2) }
+
+    // Any screen other than the two lobby screens closes the nearby connection.
+    LaunchedEffect(screen) {
+        if (screen != "connect_host" && screen != "connect_join") connect.leave()
+    }
 
     BackHandler(enabled = screen != "intro" && screen != "home") {
         screen = when (screen) {
             "game", "tournament", "family", "family_count" -> "modes"
             "family_names" -> "family_count"
+            "connect" -> "modes"
+            "connect_offline" -> "connect"
+            "connect_count", "connect_host", "connect_join" -> "connect_offline"
             "config", "sound", "rules" -> "settings"
             else -> "home"
         }
@@ -209,7 +236,32 @@ fun LudoApp(
                     onYouAndComputer = { screen = "game" },
                     onTournament = { screen = "tournament" },
                     onFamily = { screen = if (familyGame != null) "family" else "family_count" },
-                    familyActive = familyGame != null
+                    familyActive = familyGame != null,
+                    onConnect = { screen = "connect" }
+                )
+                "connect" -> ConnectMenuScreen(
+                    onBack = { screen = "modes" },
+                    onOffline = { screen = "connect_offline" }
+                )
+                "connect_offline" -> ConnectOfflineScreen(
+                    onBack = { screen = "connect" },
+                    onHost = { screen = "connect_count" },
+                    onJoin = { screen = "connect_join" }
+                )
+                "connect_count" -> ConnectCountScreen(
+                    onBack = { screen = "connect_offline" },
+                    onPick = { count ->
+                        connectCount = count
+                        screen = "connect_host"
+                    }
+                )
+                "connect_host" -> ConnectHostScreen(
+                    connect, names, connectCount,
+                    onClose = { screen = "connect_offline" }
+                )
+                "connect_join" -> ConnectJoinScreen(
+                    connect, names,
+                    onClose = { screen = "connect_offline" }
                 )
                 "family_count" -> FamilyCountScreen(
                     onBack = { screen = "modes" },

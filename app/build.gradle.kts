@@ -41,4 +41,9 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
+
+    // Connect and Play (offline): phone-to-phone link, QR scanner and QR generator.
+    implementation("com.google.android.gms:play-services-nearby:19.3.0")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    implementation("com.google.zxing:core:3.5.3")
 }
