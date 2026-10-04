@@ -184,64 +184,124 @@ fun WinnerPage(
     onModes: () -> Unit,
     /** Connect and Play guests cannot start the next game: the tick is hidden and [waitingText] shows instead. */
     nextEnabled: Boolean = true,
-    waitingText: String? = null
+    waitingText: String? = null,
+    /** true = the person holding this phone won, false = someone else won, null = not known (Family, Connect). */
+    youWon: Boolean? = null
 ) {
     BackHandler(true) { onModes() }
+    // The score box that holds the winner gets the gold crown and border (two pictures, gold on the left or on the right).
+    val found = names.indexOf(winnerName)
+    val winnerIndex = if (found >= 0) found else (scores.indices.maxByOrNull { scores[it] } ?: 0)
+    val goldLeft = if (tournament) winnerIndex <= 1 else winnerIndex == 0
+    val title = if (youWon == true) "You Won!" else "Winner!"
+    val subtitle = when (youWon) {
+        true -> "Great job! You're the champion!"
+        false -> "Better luck next time!"
+        null -> "Well played, everyone!"
+    }
+    fun scoreRow(i: Int): Pair<String, Int> = Pair(names.getOrElse(i) { "" }, scores.getOrElse(i) { 0 })
+    val leftRows = if (tournament) listOf(scoreRow(0), scoreRow(1)) else listOf(scoreRow(0))
+    val rightRows = if (tournament) {
+        // A 3-player Family game has no fourth player.
+        if (names.size > 3) listOf(scoreRow(2), scoreRow(3)) else listOf(scoreRow(2))
+    } else {
+        listOf(scoreRow(1))
+    }
+
     Box(
         Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Palette.WoodLight, Palette.WoodDark)))
+            .background(Brush.verticalGradient(listOf(WinnerBgTop, WinnerBgBottom)))
     ) {
-        Canvas(Modifier.fillMaxSize()) {
-            for ((fx, fy, color) in Confetti) {
-                drawCircle(color, size.width * 0.012f, Offset(size.width * fx, size.height * fy))
-            }
-        }
-        Panel(WinnerPanel, 0.88f) { k ->
-            // Winner name
-            Box(Modifier.offset(k * 59f, k * 316f).size(k * 612f, k * 137f), contentAlignment = Alignment.Center) {
-                PanelText(winnerName, k, 64f, maxChars = 11)
-            }
-            // Scores (Tournament has four players, so each pill shows two of them)
-            Box(Modifier.offset(k * 74f, k * 509f).size(k * 262f, k * 107f), contentAlignment = Alignment.Center) {
-                if (tournament) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        PanelText("${names[0]}: ${scores[0]}", k, 30f, maxChars = 11)
-                        PanelText("${names[1]}: ${scores[1]}", k, 30f, maxChars = 11)
-                    }
-                } else {
-                    PanelText("${names[0]}: ${scores[0]}", k, 40f, maxChars = 9)
-                }
-            }
-            Box(Modifier.offset(k * 394f, k * 509f).size(k * 262f, k * 107f), contentAlignment = Alignment.Center) {
-                if (tournament) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        PanelText("${names[2]}: ${scores[2]}", k, 30f, maxChars = 11)
-                        // A 3-player Family game has no fourth player.
-                        if (names.size > 3) PanelText("${names[3]}: ${scores[3]}", k, 30f, maxChars = 11)
-                    }
-                } else {
-                    PanelText("${names[1]}: ${scores[1]}", k, 40f, maxChars = 9)
-                }
-            }
-            // Green tick = new game, red X = Game Mode screen
-            if (nextEnabled) {
-                HotSpot(k, 179f, 698f, 156f, 156f, onNext)
-            } else {
-                // Hide the baked-in tick (same brown as the panel) and say who we are waiting for.
+        // The picture keeps its shape (9:16); on taller phones its top and bottom fade into the page colour.
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val imageWidth = minOf(maxWidth, maxHeight * (940f / 1672f))
+            val k = imageWidth / 940f
+            Box(Modifier.size(k * 940f, k * 1672f)) {
+                Image(
+                    painter = painterResource(if (goldLeft) R.drawable.winner_page_left else R.drawable.winner_page_right),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize()
+                )
                 Box(
                     Modifier
-                        .offset(k * 170f, k * 688f)
-                        .size(k * 174f, k * 176f)
-                        .background(Color(0xFF3E2411), RoundedCornerShape(k * 40f))
+                        .size(k * 940f, k * 46f)
+                        .background(Brush.verticalGradient(listOf(WinnerBgTop, Color.Transparent)))
                 )
-                if (waitingText != null) {
-                    Box(Modifier.offset(k * 59f, k * 624f).size(k * 612f, k * 60f), contentAlignment = Alignment.Center) {
-                        PanelText(waitingText, k, 34f, maxChars = 26)
+                Box(
+                    Modifier
+                        .offset(0.dp, k * 1626f)
+                        .size(k * 940f, k * 46f)
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, WinnerBgBottom)))
+                )
+
+                // Title and a line under it
+                Box(Modifier.offset(k * 130f, k * 596f).size(k * 680f, k * 112f), contentAlignment = Alignment.Center) {
+                    PanelText(title, k, 92f, maxChars = 9)
+                }
+                Box(Modifier.offset(k * 140f, k * 708f).size(k * 660f, k * 56f), contentAlignment = Alignment.Center) {
+                    BasicText(
+                        subtitle,
+                        style = TextStyle(
+                            color = Color(0xFFA7B6F2),
+                            fontSize = (k * 36f).toSp2(),
+                            fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center
+                        ),
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                // Winner name
+                Box(Modifier.offset(k * 160f, k * 812f).size(k * 620f, k * 96f), contentAlignment = Alignment.Center) {
+                    PanelText(winnerName, k, 78f, maxChars = 12)
+                }
+                // Scores (Tournament has four players, so each box shows two of them)
+                Box(Modifier.offset(k * 258f, k * 992f).size(k * 184f, k * 100f), contentAlignment = Alignment.Center) {
+                    WinnerScoreText(k, tournament, leftRows)
+                }
+                Box(Modifier.offset(k * 613f, k * 992f).size(k * 164f, k * 100f), contentAlignment = Alignment.Center) {
+                    WinnerScoreText(k, tournament, rightRows)
+                }
+
+                // Green tick (and its words) = new game, red X (and its words) = Game Mode screen
+                if (nextEnabled) {
+                    HotSpot(k, 262f, 1150f, 170f, 215f, onNext)
+                } else {
+                    // Hide the baked-in tick (same colour as the card) and say who we are waiting for.
+                    Box(
+                        Modifier
+                            .offset(k * 248f, k * 1146f)
+                            .size(k * 200f, k * 224f)
+                            .background(Brush.verticalGradient(listOf(Color(0xFF061329), Color(0xFF05172F))))
+                    )
+                    if (waitingText != null) {
+                        Box(Modifier.offset(k * 130f, k * 1112f).size(k * 680f, k * 50f), contentAlignment = Alignment.Center) {
+                            PanelText(waitingText, k, 34f, maxChars = 30)
+                        }
                     }
                 }
+                HotSpot(k, 506f, 1150f, 186f, 215f, onModes)
             }
-            HotSpot(k, 394f, 698f, 156f, 156f, onModes)
+        }
+    }
+}
+
+private val WinnerBgTop = Color(0xFF0E1E35)
+private val WinnerBgBottom = Color(0xFF0A2041)
+
+/** One score box: a single player (name, then a big score) or two players (one line each, Tournament). */
+@Composable
+private fun WinnerScoreText(k: Dp, tournament: Boolean, rows: List<Pair<String, Int>>) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (tournament) {
+            for (row in rows) {
+                PanelText("${row.first}: ${row.second}", k, 30f, maxChars = 11)
+            }
+        } else {
+            val row = rows.first()
+            PanelText("${row.first}:", k, 32f, color = Color(0xFFC9D6FA), maxChars = 9)
+            PanelText("${row.second}", k, 68f, maxChars = 4)
         }
     }
 }

@@ -931,6 +931,7 @@ fun LudoScreen(
                     List(if (game.family) game.familyPlayers else PlayerNames.COUNT) { sc.getOrElse(it) { 0 } }
                 },
                 tournament = tournament,
+                youWon = if (game.family) null else game.winner == 0,
                 onNext = { game.nextGame() },
                 onModes = {
                     game.nextGame()
