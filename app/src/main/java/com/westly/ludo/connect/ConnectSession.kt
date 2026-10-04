@@ -75,13 +75,13 @@ class HostSaveInfo(val room: String, val playerCount: Int)
  * Screens only read the observable fields and call the functions; all networking goes through
  * [ConnectManager]. Nearby callbacks arrive on the main thread, so the fields can be changed directly.
  */
-class ConnectSession(context: Context, private val prefs: SharedPreferences) : ConnectManager.Listener {
+class ConnectSession(context: Context, private val prefs: SharedPreferences) : ConnectManager.Listener, LiveSession {
 
     private val manager = ConnectManager(context.applicationContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     /** The pointing hand of the other players (Phase 3). The game screen draws [RemoteHandPlayer.current]. */
-    val hand = RemoteHandPlayer(scope)
+    override val hand = RemoteHandPlayer(scope)
 
     init {
         manager.listener = this
@@ -99,17 +99,17 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         private set
 
     /** 2, 3 or 4, including the host. */
-    var playerCount by mutableStateOf(2)
+    override var playerCount by mutableStateOf(2)
         private set
 
     /** This phone's seat (0 = host); -1 when not seated. */
     var mySeat by mutableStateOf(-1)
         private set
-    var hostName by mutableStateOf("")
+    override var hostName by mutableStateOf("")
         private set
 
     /** The text inside the QR code (host only). */
-    var ticketText by mutableStateOf("")
+    override var ticketText by mutableStateOf("")
         private set
 
     /** A problem the person can retry: shown with a Try again button. */
@@ -134,26 +134,26 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     // ----- Phase 4: leave and return -----
 
     /** Guest: how the link to the host is doing while a game is on screen. */
-    var link by mutableStateOf(LinkState.OK)
+    override var link by mutableStateOf(LinkState.OK)
         private set
 
     /** Guest: this phone has no seat and only watches. */
-    var watching by mutableStateOf(false)
+    override var watching by mutableStateOf(false)
         private set
 
     /** Host: whether people without a seat may scan the QR code and watch. Off by default. */
-    var allowWatchers by mutableStateOf(false)
+    override var allowWatchers by mutableStateOf(false)
         private set
 
     /** Host: how many watchers are connected right now. */
-    var watcherCount by mutableStateOf(0)
+    override var watcherCount by mutableStateOf(0)
         private set
 
     /**
      * A message that covers the game screen with one OK button: the host ended the session, this person
      * was removed, or the game could not be found. The game screen stays up until OK so the person can read it.
      */
-    var finalText by mutableStateOf<String?>(null)
+    override var finalText by mutableStateOf<String?>(null)
         private set
 
     /** Guest: the game this phone can return to, or null (drives the Rejoin button). */
@@ -189,24 +189,24 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     /** The engine player each seat plays in the current game (index = seat). Re-drawn for every new game. */
     val playerOfSeat = mutableStateListOf<Int>()
 
-    val isHost: Boolean get() = role == ConnectRole.HOST
+    override val isHost: Boolean get() = role == ConnectRole.HOST
 
     /** The engine player this phone controls (0..3), or -1 when there is no game. */
-    val myPlayer: Int get() = playerOfSeat.getOrElse(mySeat) { -1 }
+    override val myPlayer: Int get() = playerOfSeat.getOrElse(mySeat) { -1 }
 
     /** The seat that plays [player], or -1 when nobody does (the absent colour of a 3-player game). */
-    fun seatOfPlayer(player: Int): Int = playerOfSeat.indexOf(player)
+    override fun seatOfPlayer(player: Int): Int = playerOfSeat.indexOf(player)
 
-    fun seatName(seat: Int): String = roster.firstOrNull { it.seat == seat }?.name ?: ""
+    override fun seatName(seat: Int): String = roster.firstOrNull { it.seat == seat }?.name ?: ""
 
     /** The name shown for an engine player; empty when nobody plays that player. */
-    fun playerName(player: Int): String {
+    override fun playerName(player: Int): String {
         val seat = seatOfPlayer(player)
         return if (seat < 0) "" else seatName(seat)
     }
 
     /** A person's running score. It follows the person, not the colour, because colours are re-drawn each game. */
-    fun scoreOfSeat(seat: Int): Int {
+    override fun scoreOfSeat(seat: Int): Int {
         val g = game ?: return 0
         val p = playerOfSeat.getOrElse(seat) { -1 }
         return if (p < 0) 0 else g.scores.getOrElse(p) { 0 }
@@ -223,15 +223,15 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         }
     }
 
-    val myColors: List<LudoColor> get() = colorsOfSeat(mySeat)
+    override val myColors: List<LudoColor> get() = colorsOfSeat(mySeat)
 
     /** "You are Red" or "You are Green + Blue" ("You are watching" for a watcher). */
-    val youAreText: String
+    override val youAreText: String
         get() = if (watching) "You are watching"
         else "You are " + myColors.joinToString(" + ") { colorWord(it) }
 
     /** True when this person was knocked out of the tournament and is only watching the rest. */
-    val iAmOut: Boolean
+    override val iAmOut: Boolean
         get() {
             val g = game ?: return false
             val p = myPlayer
@@ -246,7 +246,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     /** True when somebody was removed by the host (no new game can start then). */
-    val hasRemoved: Boolean get() = roster.any { it.removed }
+    override val hasRemoved: Boolean get() = roster.any { it.removed }
 
     /** A seat whose phone dropped and that the game still needs (not knocked out, not removed). */
     private fun isGone(seat: Int): Boolean {
@@ -258,7 +258,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      * The seat everybody is waiting for, or -1. A dropped person whose turn it is (or whose tie-break roll
      * is due) comes first; otherwise the first dropped person. Nothing is shown while this phone's own link is down.
      */
-    val waitingForSeat: Int
+    override val waitingForSeat: Int
         get() {
             if (!inGame || link != LinkState.OK) return -1
             val g = game
@@ -287,7 +287,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      * Host only: true when the seat's connection is lost and the game is at a moment where the person can
      * be taken out (never for a connected person, never for the host, never while a result is showing).
      */
-    fun canRemove(seat: Int): Boolean {
+    override fun canRemove(seat: Int): Boolean {
         if (role != ConnectRole.HOST || !started || !inGame || sessionEnded || seat <= 0) return false
         val g = game ?: return false
         val e = roster.firstOrNull { it.seat == seat } ?: return false
@@ -311,7 +311,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      * True when this phone may act right now, judged from the state on screen: it is this person's turn
      * to roll, choose or capture. The host re-checks everything again before it does anything.
      */
-    fun canAct(): Boolean {
+    override fun canAct(): Boolean {
         val g = game ?: return false
         val me = myPlayer
         if (me < 0 || watching || finalText != null || link != LinkState.OK) return false
@@ -328,7 +328,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         act(HostIntent(mySeat, ConnectProtocol.K_ROLL), ConnectProtocol.intent(ConnectProtocol.K_ROLL))
     }
 
-    fun tapDie(i: Int) {
+    override fun tapDie(i: Int) {
         if (!canAct() || game?.phase != Phase.Choose || i !in 0..2) return
         act(
             HostIntent(mySeat, ConnectProtocol.K_SELECT_DIE, i = i),
@@ -337,7 +337,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     /** A tap on the board: the dice area rolls, a tap while choosing is a move. */
-    fun tapBoard(row: Float, col: Float) {
+    override fun tapBoard(row: Float, col: Float) {
         val g = game ?: return
         if (!canAct()) return
         when (g.phase) {
@@ -351,7 +351,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     /** A tap on a pawn in the pick pop-up (which seed to move, or which opponent seed to capture). */
-    fun tapPiece(tag: Any?) {
+    override fun tapPiece(tag: Any?) {
         val piece = tag as? Piece ?: return
         if (!canAct()) return
         val ph = game?.phase
@@ -363,20 +363,20 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     /** A tap on this person's own dice in the tie-break. */
-    fun tapTie() {
+    override fun tapTie() {
         val g = game ?: return
         if (g.overlay != TOverlay.TIEBREAK || g.tieTurn < 0 || g.tieTurn != myPlayer) return
         act(HostIntent(mySeat, ConnectProtocol.K_TIE_ROLL), ConnectProtocol.intent(ConnectProtocol.K_TIE_ROLL))
     }
 
     /** Host only: Next Round on the round result. */
-    fun tapNextRound() {
+    override fun tapNextRound() {
         if (!isHost) return
         act(HostIntent(0, ConnectProtocol.K_NEXT_ROUND), ConnectProtocol.intent(ConnectProtocol.K_NEXT_ROUND))
     }
 
     /** Host only: start the next game of the same room, with new random colours. */
-    fun tapNextGame() {
+    override fun tapNextGame() {
         if (!isHost) return
         act(HostIntent(0, ConnectProtocol.K_NEXT_GAME), ConnectProtocol.intent(ConnectProtocol.K_NEXT_GAME))
     }
@@ -559,7 +559,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     /** Guest: the Try again button after the 30 seconds of looking for the host ran out. */
-    fun retryReconnect() {
+    override fun retryReconnect() {
         if (role != ConnectRole.GUEST || !inGame || finalText != null) return
         if (link == LinkState.RECONNECTING) return
         link = LinkState.RECONNECTING
@@ -596,7 +596,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
     }
 
     /** Host: the Allow watchers switch. */
-    fun switchWatchers(on: Boolean) {
+    override fun switchWatchers(on: Boolean) {
         if (role != ConnectRole.HOST) return
         allowWatchers = on
         saveDirty = true
@@ -607,7 +607,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      * Host: takes [seat] out of the game (Remove player). The engine does the rest on the queue, so it never
      * runs at the same moment as a tap. Only allowed for a seat whose connection is lost.
      */
-    fun removePlayer(seat: Int) {
+    override fun removePlayer(seat: Int) {
         if (!canRemove(seat)) return
         enqueue(HostIntent(0, K_REMOVE, i = seat))
     }
@@ -616,7 +616,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      * Host: End Game / End Tournament. Everybody is told, the saved game is deleted, and the host stays on a
      * final panel (still answering phones that come back, with the same news) until it presses OK.
      */
-    fun endForEveryone() {
+    override fun endForEveryone() {
         if (role != ConnectRole.HOST || !started || sessionEnded) return
         val g = game
         if (g != null && g.phase == Phase.GameOver && g.winner >= 0) lastWinner = playerName(g.winner)
@@ -1061,7 +1061,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
      * Leaves whatever is running: tells the other phones, stops advertising and discovery, closes
      * every connection and clears the screen state. Safe to call at any time, also when idle.
      */
-    fun leave() {
+    override fun leave() {
         when (role) {
             ConnectRole.HOST -> {
                 if (started && game != null && !sessionEnded) {

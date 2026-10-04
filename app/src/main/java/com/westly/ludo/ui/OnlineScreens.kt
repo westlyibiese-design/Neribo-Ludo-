@@ -420,7 +420,7 @@ private fun OnlineSeatRow(seat: Int, label: String, filled: Boolean, u: Dp) {
 private fun ColumnScope.OnlineRoomBody(session: OnlineSession, room: OnlineRoom, u: Dp) {
     val context = LocalContext.current
     Spacer(Modifier.height(u * 2f))
-    if (session.link == OnlineLink.OFFLINE) {
+    if (session.roomLink == OnlineLink.OFFLINE) {
         ConnectNotice("No internet. Trying again...", u)
         Spacer(Modifier.height(u * 2f))
     }
@@ -490,7 +490,7 @@ private fun ColumnScope.OnlineRoomBody(session: OnlineSession, room: OnlineRoom,
     val missing = room.playerCount - present
     val status = when {
         session.myRole == OnlineRole.WATCHER -> "You are watching."
-        room.status == "playing" -> "Everyone is here! The game itself arrives in the next update."
+        room.status == "playing" -> "Everyone is here! Starting the game..."
         missing <= 1 -> "Waiting for the last player..."
         else -> "Waiting for $missing more players..."
     }
@@ -568,6 +568,44 @@ fun OnlineRoomScreen(session: OnlineSession, onClosed: () -> Unit) {
                 onSecondary = { askExit = false },
                 primarySwatch = Palette.Red
             )
+        }
+    }
+}
+
+/** Opens the Android share sheet with the room code (WhatsApp, SMS, ...). */
+internal fun shareRoomCode(context: Context, code: String) {
+    val text = "Join my Ludo Mate game! Room code: $code\n" +
+        "Open Ludo Mate > Connect and Play > Online > Join a Room."
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, text)
+    }
+    try {
+        context.startActivity(Intent.createChooser(send, "Share room code"))
+    } catch (e: Exception) {
+        // No app can share text on this phone: nothing to do.
+    }
+}
+
+/** The host's "Show room code" panel inside an online game: the code, Share code and Close. */
+@Composable
+fun OnlineCodeDialog(code: String, onClose: () -> Unit) {
+    val context = LocalContext.current
+    BackHandler(true) { onClose() }
+    OnlineScrim {
+        OnlineCard { u ->
+            OnlineText("Room code", u, 4.4f, color = Color.White.copy(alpha = 0.85f), maxLines = 1)
+            Spacer(Modifier.height(u * 2f))
+            BasicText(
+                code,
+                style = menuText((u * 13f).sp()).copy(letterSpacing = (u * 2f).sp()),
+                maxLines = 1,
+                softWrap = false
+            )
+            Spacer(Modifier.height(u * 4f))
+            GlossButton("Share code", Palette.Blue, u * 56f, u * 12f, onClick = { shareRoomCode(context, code) })
+            Spacer(Modifier.height(u * 3f))
+            GlossButton("Close", Palette.Green, u * 56f, u * 12f, onClick = onClose)
         }
     }
 }

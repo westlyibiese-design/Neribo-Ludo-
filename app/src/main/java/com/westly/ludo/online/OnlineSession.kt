@@ -5,6 +5,21 @@ import android.content.SharedPreferences
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import android.os.SystemClock
+import androidx.compose.runtime.mutableStateListOf
+import com.westly.ludo.connect.ConnectProtocol
+import com.westly.ludo.connect.ConnectSession
+import com.westly.ludo.connect.LinkState
+import com.westly.ludo.connect.LiveSession
+import com.westly.ludo.connect.RemoteHandPlayer
+import com.westly.ludo.connect.SeatAssignment
+import com.westly.ludo.game.HandTarget
+import com.westly.ludo.game.LudoColor
+import com.westly.ludo.game.LudoGame
+import com.westly.ludo.game.Phase
+import com.westly.ludo.game.Piece
+import com.westly.ludo.game.TOverlay
+import com.westly.ludo.game.VisualEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -13,9 +28,14 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import java.security.SecureRandom
 import kotlin.coroutines.cancellation.CancellationException
+
+/** The host sends the game state at most this often, in milliseconds (always the latest one). */
+const val ONLINE_STATE_INTERVAL_MS = 250L
 
 /** What this person is in the room. */
 enum class OnlineRole { HOST, PLAYER, WATCHER }
@@ -30,7 +50,11 @@ data class OnlineRoom(
     val playerCount: Int,
     val maxWatchers: Int,
     val status: String,
-    val hostId: String
+    val hostId: String,
+    /** 0 until the host has started the first game, then 1, 2, ... */
+    val gameNo: Int = 0,
+    /** The engine player of each seat in the current game (index = seat), empty until a game is recorded. */
+    val assignment: List<Int> = emptyList()
 )
 
 /** One person in the room. [seat] is null for a watcher; seat 0 is the host. */
@@ -70,7 +94,7 @@ class OnlineSession(
     context: Context,
     private val prefs: SharedPreferences,
     private val auth: OnlineAuth
-) {
+) : LiveSession {
     private val appContext = context.applicationContext
 
     /** Calls run on the main thread's scope; the network work itself happens on IO inside [SupabaseApi]. */
@@ -108,7 +132,7 @@ class OnlineSession(
     var problem by mutableStateOf<String?>(null)
         private set
 
-    var link by mutableStateOf(OnlineLink.OK)
+    var roomLink by mutableStateOf(OnlineLink.OK)
         private set
 
     /** The live room the server reports for this person; drives the "Return to room" button. */
@@ -129,6 +153,11 @@ class OnlineSession(
 
     fun onAppForeground() {
         foreground = true
+        if (inGame && finalText == null) {
+            // A phone that slept may have lost its socket: connect again and ask for the game.
+            socket.ensureConnected()
+            if (!isHost) requestState()
+        }
     }
 
     fun onAppBackground() {
@@ -137,6 +166,8 @@ class OnlineSession(
 
     /** Stops polling and any call in progress. Called when the activity is destroyed. */
     fun release() {
+        stopGame()
+        socket.release()
         scope.cancel()
     }
 
@@ -384,10 +415,10 @@ class OnlineSession(
         val j = reply.json
         if (j == null) {
             // Only a real network problem shows the banner; other errors are simply tried again.
-            if (reply.failure?.kind == OnlineException.Kind.NO_NETWORK) link = OnlineLink.OFFLINE
+            if (reply.failure?.kind == OnlineException.Kind.NO_NETWORK) roomLink = OnlineLink.OFFLINE
             return
         }
-        link = OnlineLink.OK
+        roomLink = OnlineLink.OK
         // The person may have left while this call was on its way.
         if (room?.id != current.id) return
         if (j.optBoolean("ok", false)) {
@@ -424,11 +455,12 @@ class OnlineSession(
     }
 
     private fun clearLocal() {
+        stopGame()
         room = null
         members = emptyList()
         mySeat = -1
         myRole = null
-        link = OnlineLink.OK
+        roomLink = OnlineLink.OK
     }
 
     /** Calls a database function. Never throws, except to stop when the scope is cancelled. */
@@ -473,7 +505,7 @@ class OnlineSession(
         if (fetch) {
             val snap = call("ludo_room_snapshot", JSONObject().put("p_room", id)).json
             if (snap != null && snap.optBoolean("ok", false) && applySnapshot(snap)) {
-                link = OnlineLink.OK
+                roomLink = OnlineLink.OK
                 return
             }
         }
@@ -491,7 +523,7 @@ class OnlineSession(
         members = listOf(OnlineMember(myId, if (seat >= 0) seat else null, role, j.optString("name", "")))
         mySeat = seat
         myRole = role
-        link = OnlineLink.OK
+        roomLink = OnlineLink.OK
     }
 
     /** Loads a room this person is a member of. Returns false (with a message) when that is not possible. */
@@ -512,7 +544,7 @@ class OnlineSession(
                 notice = reasonText("ended")
                 return false
             }
-            link = OnlineLink.OK
+            roomLink = OnlineLink.OK
             return true
         }
         val reason = j.optString("reason", "")
@@ -530,7 +562,9 @@ class OnlineSession(
                 playerCount = r.getInt("player_count"),
                 maxWatchers = r.optInt("max_watchers", 0),
                 status = r.getString("status"),
-                hostId = r.optString("host_id", "")
+                hostId = r.optString("host_id", ""),
+                gameNo = r.optInt("game_no", 0),
+                assignment = parseOrder(r.optJSONArray("assignment"), r.getInt("player_count")) ?: emptyList()
             )
             val array = j.getJSONArray("members")
             val list = ArrayList<OnlineMember>()
@@ -553,6 +587,7 @@ class OnlineSession(
                 mySeat = mine.seat ?: -1
                 myRole = mine.role
             }
+            afterSnapshot()
             true
         } catch (e: JSONException) {
             false
@@ -579,10 +614,1194 @@ class OnlineSession(
         else -> MSG_GENERIC
     }
 
+    // ---------------------------------------------------------------------------------------
+    // The online game (Phase 3)
+    //
+    // Design in one place. The HOST's phone runs the rules (LudoGame) exactly like the Offline host;
+    // every other phone, players and watchers alike, shows a display model that is only ever filled
+    // from the host's snapshots. Only the road the messages take is different from Offline:
+    //
+    //   ludo:<room>:down          host -> everybody   start, state, ev (live view), ended
+    //   ludo:<room>:to:<user>     host -> one person  start + state (an answer to resync)
+    //   ludo:<room>:up:<user>     one person -> host  intent (a tap) and resync
+    //
+    // Starting. When the room snapshot says "playing" and game_no is still 0, the host draws the
+    // random colours, creates the engine, records game_no and the seat -> player assignment on the
+    // server (ludo_publish_start), opens the socket, joins "down" and an "up" + "to" channel for
+    // every person it knows, and publishes "start" and the first "state". Every 3 seconds it reads
+    // the roster again, joins the channels of people who arrived meanwhile (watchers can come late)
+    // and sends them the game without waiting for them to ask.
+    //
+    // Guests and watchers. They read game_no and the assignment from the same room snapshot, so they
+    // can build the display model even if the live "start" never reaches them. They join "down",
+    // "to:<me>" and "up:<me>", and as soon as all three are joined they send "resync"; the host
+    // answers on "to:<me>". The resync is repeated every 2 seconds until the first state is on screen
+    // and is sent again every time the channels are joined again (after a lost connection).
+    //
+    // The sender of a tap is the user id in the "up" topic, which the server checks against the
+    // caller. The host maps it to a seat through the roster and never reads a seat from a message.
+    // A watcher has no seat, so everything from a watcher except "resync" is dropped.
+    // ---------------------------------------------------------------------------------------
+
+    /** The pointing hand of the other players (the game screen draws [RemoteHandPlayer.current]). */
+    override val hand = RemoteHandPlayer(scope)
+
+    /** One WebSocket for all the game channels. Its access token always comes from [OnlineAuth]. */
+    private val socket = RealtimeSocket { auth.accessToken() }
+
+    /**
+     * The game on screen. On the host it is the real engine; on every other phone a display model that
+     * is only filled from the host's snapshots. Null outside a game.
+     */
+    var game by mutableStateOf<LudoGame?>(null)
+        private set
+
+    /** True from the moment a game is on screen until this phone leaves it. */
+    var inGame by mutableStateOf(false)
+        private set
+
+    /** 1 for the first game of the room, then one more for every new game. */
+    var gameNo by mutableStateOf(0)
+        private set
+
+    /** The engine player each seat plays in the current game (index = seat). Re-drawn for every new game. */
+    val playerOfSeat = mutableStateListOf<Int>()
+
+    /** A message that covers the game screen with one OK button (the host ended it, ...). */
+    override var finalText by mutableStateOf<String?>(null)
+        private set
+
+    /** The screen's coroutine scope: it has the frame clock the host's rules and the animations need. */
+    private var uiScope: CoroutineScope? = null
+
+    /** Bumped when a game is torn down; late answers and old loops notice and stop. */
+    private var generation = 0
+    private val random = SecureRandom()
+
+    // Host working state
+    private var seq = 0
+    private var lastSent = ""
+    private val seatScores = IntArray(4)
+    private val queue = ArrayDeque<HostIntent>()
+    private var draining = false
+    private var runnerJob: Job? = null
+    private var sessionEnded = false
+    private var lastWinner = ""
+    private var publisherJob: Job? = null
+    private val hostKnown = HashSet<String>()
+    private val evTimes = ArrayDeque<Long>()
+
+    // Everybody
+    private var gameLoopJob: Job? = null
+    private var channelsOpen = false
+
+    // Guest and watcher working state
+    private var resyncJob: Job? = null
+    private var lastSeq = 0
+    private var appliedGameNo = 0
+
+    /** One animation a phone has been told to play. [seq] is the snapshot that follows it. */
+    private class Anim(
+        val kind: String,
+        val seq: Int,
+        val v1: Int = 0,
+        val v2: Int = 0,
+        val color: String = "",
+        val slot: Int = 0,
+        val durationMs: Long = 0L,
+        val rank: Int = -1,
+        val moverColor: String = "",
+        val moverSlot: Int = -1
+    )
+
+    private val anims = ArrayDeque<Anim>()
+    private var animJob: Job? = null
+    private var safetyJob: Job? = null
+    private var busyUntil = 0L
+    private var pendingSnapshot: JSONObject? = null
+    private var pendingSeq = 0
+    private var visualsDirty = false
+
+    /** One tap waiting for the host to check it. [seat] is whoever made it (0 = the host itself). */
+    private class HostIntent(
+        val seat: Int,
+        val kind: String,
+        val i: Int = 0,
+        val row: Float = 0f,
+        val col: Float = 0f,
+        val color: String = "",
+        val slot: Int = 0
+    )
+
+    /** The screen that runs the game gives its coroutine scope (see [uiScope]). */
+    fun bindScope(ui: CoroutineScope) {
+        uiScope = ui
+    }
+
+    // ----- What the game screen reads (LiveSession) -----
+
+    override val isHost: Boolean get() = myRole == OnlineRole.HOST
+
+    override val watching: Boolean get() = myRole == OnlineRole.WATCHER
+
+    /** The engine player this phone controls (0..3), or -1 for a watcher or when there is no game. */
+    override val myPlayer: Int get() = playerOfSeat.getOrElse(mySeat) { -1 }
+
+    override val playerCount: Int get() = room?.playerCount ?: playerOfSeat.size
+
+    override val hostName: String get() = members.firstOrNull { it.role == OnlineRole.HOST }?.name ?: ""
+
+    override val watcherCount: Int get() = members.count { it.role == OnlineRole.WATCHER }
+
+    /** Online watchers are chosen when the room is made, so this only says whether there are watcher places. */
+    override val allowWatchers: Boolean get() = (room?.maxWatchers ?: 0) > 0
+
+    /** Removing people is a later phase. */
+    override val hasRemoved: Boolean get() = false
+
+    /** Waiting for a dropped phone is a later phase; until then the game simply waits on that person's turn. */
+    override val waitingForSeat: Int get() = -1
+
+    /** Reconnecting dialogs are a later phase. */
+    override val link: LinkState get() = LinkState.OK
+
+    override val ticketText: String get() = ""
+
+    override val isOnline: Boolean get() = true
+
+    override val onlineRoomCode: String? get() = room?.code
+
+    override val canToggleWatchers: Boolean get() = false
+
+    override fun seatOfPlayer(player: Int): Int = playerOfSeat.indexOf(player)
+
+    override fun seatName(seat: Int): String =
+        members.firstOrNull { it.seat == seat && it.role != OnlineRole.WATCHER }?.name ?: ""
+
+    override fun playerName(player: Int): String {
+        val seat = seatOfPlayer(player)
+        return if (seat < 0) "" else seatName(seat)
+    }
+
+    /** A person's running score. It follows the person, not the colour, because colours are re-drawn each game. */
+    override fun scoreOfSeat(seat: Int): Int {
+        val g = game ?: return 0
+        val p = playerOfSeat.getOrElse(seat) { -1 }
+        return if (p < 0) 0 else g.scores.getOrElse(p) { 0 }
+    }
+
+    /** The colours a seat plays, in the order they are named on screen. */
+    private fun colorsOfSeat(seat: Int): List<LudoColor> {
+        val p = playerOfSeat.getOrElse(seat) { -1 }
+        return when {
+            p < 0 -> emptyList()
+            playerOfSeat.size >= 3 -> listOf(TOURNAMENT_COLORS[p])
+            p == 0 -> listOf(LudoColor.RED, LudoColor.YELLOW)
+            else -> listOf(LudoColor.GREEN, LudoColor.BLUE)
+        }
+    }
+
+    override val myColors: List<LudoColor> get() = colorsOfSeat(mySeat)
+
+    /** "You are Red" or "You are Green + Blue" ("You are watching" for a watcher). */
+    override val youAreText: String
+        get() = if (watching) "You are watching"
+        else "You are " + myColors.joinToString(" + ") { colorWord(it) }
+
+    /** True when this person was knocked out of the tournament and is only watching the rest. */
+    override val iAmOut: Boolean
+        get() {
+            val g = game ?: return false
+            val p = myPlayer
+            return p >= 0 && g.tournament && !g.active[p]
+        }
+
+    override fun canRemove(seat: Int): Boolean = false
+
+    override fun removePlayer(seat: Int) {
+        // Removing a player that dropped is Phase 4.
+    }
+
+    override fun switchWatchers(on: Boolean) {
+        // Online watchers are fixed when the room is created.
+    }
+
+    override fun retryReconnect() {
+        // Reconnect dialogs are Phase 4; the socket already reconnects by itself.
+    }
+
+    /**
+     * True when this phone may act right now, judged from the state on screen: it is this person's turn
+     * to roll, choose or capture. The host re-checks everything again before it does anything.
+     */
+    override fun canAct(): Boolean {
+        val g = game ?: return false
+        val me = myPlayer
+        if (me < 0 || watching || finalText != null) return false
+        return when (g.phase) {
+            Phase.AwaitRoll, Phase.Choose, Phase.CaptureChoose -> g.activePlayer == me
+            else -> false
+        }
+    }
+
+    // ----- Taps from the game screen. The host queues them for itself, everybody else sends them as an "intent". -----
+
+    private fun tapRoll() {
+        if (!canAct() || game?.phase != Phase.AwaitRoll) return
+        act(HostIntent(mySeat, ConnectProtocol.K_ROLL), ConnectProtocol.intent(ConnectProtocol.K_ROLL))
+    }
+
+    override fun tapDie(i: Int) {
+        if (!canAct() || game?.phase != Phase.Choose || i !in 0..2) return
+        act(
+            HostIntent(mySeat, ConnectProtocol.K_SELECT_DIE, i = i),
+            ConnectProtocol.intentSelectDie(i)
+        )
+    }
+
+    /** A tap on the board: the dice area rolls, a tap while choosing is a move. */
+    override fun tapBoard(row: Float, col: Float) {
+        val g = game ?: return
+        if (!canAct()) return
+        when (g.phase) {
+            Phase.AwaitRoll -> if (row in 6f..9f && col in 6f..9f) tapRoll()
+            Phase.Choose -> act(
+                HostIntent(mySeat, ConnectProtocol.K_BOARD_TAP, row = row, col = col),
+                ConnectProtocol.intentBoardTap(row, col)
+            )
+            else -> Unit
+        }
+    }
+
+    /** A tap on a pawn in the pick pop-up (which seed to move, or which opponent seed to capture). */
+    override fun tapPiece(tag: Any?) {
+        val piece = tag as? Piece ?: return
+        if (!canAct()) return
+        val ph = game?.phase
+        if (ph != Phase.Choose && ph != Phase.CaptureChoose) return
+        act(
+            HostIntent(mySeat, ConnectProtocol.K_PICK_PIECE, color = piece.color.name, slot = piece.slot),
+            ConnectProtocol.intentPickPiece(piece.color.name, piece.slot)
+        )
+    }
+
+    /** A tap on this person's own dice in the tie-break. */
+    override fun tapTie() {
+        val g = game ?: return
+        if (g.overlay != TOverlay.TIEBREAK || g.tieTurn < 0 || g.tieTurn != myPlayer) return
+        act(HostIntent(mySeat, ConnectProtocol.K_TIE_ROLL), ConnectProtocol.intent(ConnectProtocol.K_TIE_ROLL))
+    }
+
+    /** Host only: Next Round on the round result. */
+    override fun tapNextRound() {
+        if (!isHost) return
+        act(HostIntent(0, ConnectProtocol.K_NEXT_ROUND), ConnectProtocol.intent(ConnectProtocol.K_NEXT_ROUND))
+    }
+
+    /** Host only: start the next game of the same room, with new random colours. */
+    override fun tapNextGame() {
+        if (!isHost) return
+        act(HostIntent(0, ConnectProtocol.K_NEXT_GAME), ConnectProtocol.intent(ConnectProtocol.K_NEXT_GAME))
+    }
+
+    /** Host and guest taps go through this one route: the host's own are queued, everybody else's are sent. */
+    private fun act(intent: HostIntent, message: JSONObject) {
+        if (isHost) enqueue(intent) else sendUp(message)
+    }
+
+    // ----- Topics -----
+
+    private fun downTopic(roomId: String) = "ludo:" + roomId.lowercase() + ":down"
+
+    private fun toTopic(roomId: String, userId: String) = "ludo:" + roomId.lowercase() + ":to:" + userId.lowercase()
+
+    private fun upTopic(roomId: String, userId: String) = "ludo:" + roomId.lowercase() + ":up:" + userId.lowercase()
+
+    private fun myId(): String? = auth.user?.id?.lowercase()
+
+    /** Sends [message] to the host on this person's own "up" channel; the message type is the event name. */
+    private fun sendUp(message: JSONObject) {
+        val r = room ?: return
+        val me = myId() ?: return
+        socket.send(upTopic(r.id, me), message.optString("t", ""), message)
+    }
+
+    // ----- Starting a game, on whichever phone notices that the room is playing -----
+
+    /**
+     * Called after every room snapshot. It starts the game on the host when the room just became
+     * "playing", lets guests and watchers enter the game once the host has recorded it, and notices
+     * that the room was ended. Nothing here runs the rules.
+     */
+    private fun afterSnapshot() {
+        val r = room ?: return
+        if (finalText != null || sessionEnded) return
+        if (r.status == "ended") {
+            if (inGame) showGameOver(if (isHost) MSG_ROOM_CLOSED else MSG_GAME_ENDED)
+            return
+        }
+        if (r.status != "playing") return
+        if (isHost) {
+            if (!inGame && r.gameNo == 0) {
+                hostBeginFirstGame()
+            } else if (inGame) {
+                syncHostMembers()
+                // The record on the server is behind this game (the first call failed): say it again.
+                if (r.gameNo != gameNo) publishStartToServer()
+            }
+        } else if (r.gameNo >= 1 && validOrder(r.assignment, r.playerCount)) {
+            if (!inGame || r.gameNo > gameNo) guestEnterGame(r)
+        }
+    }
+
+    private fun validOrder(order: List<Int>, n: Int): Boolean {
+        if (n !in 2..4 || order.size != n || order.toSet().size != n) return false
+        if (order.any { it !in 0..3 }) return false
+        return !(n == 2 && order.any { it > 1 })
+    }
+
+    /** Reads a list of {seat, player} (the room record or a "start" message) into player-per-seat, or null if damaged. */
+    private fun parseOrder(arr: JSONArray?, n: Int): List<Int>? {
+        if (arr == null || n !in 2..4) return null
+        val order = IntArray(n) { -1 }
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val seat = o.optInt("seat", -1)
+            val player = o.optInt("player", -1)
+            if (seat !in 0 until n || player !in 0..3) continue
+            order[seat] = player
+        }
+        val list = order.toList()
+        return if (validOrder(list, n)) list else null
+    }
+
+    /** Who plays which engine player: 2 players = player 0 / 1 shuffled, 3 = three of the four colours, 4 = all. */
+    private fun drawAssignment(count: Int): List<Int> {
+        val pool = ArrayList<Int>(if (count == 2) listOf(0, 1) else listOf(0, 1, 2, 3))
+        java.util.Collections.shuffle(pool, random)
+        return pool.take(count)
+    }
+
+    private fun hostBeginFirstGame() {
+        val r = room ?: return
+        if (uiScope == null) return   // the screen is not up yet: the next snapshot tries again
+        if (members.count { it.role != OnlineRole.WATCHER } < r.playerCount) return
+        for (i in seatScores.indices) seatScores[i] = 0
+        gameNo = 0
+        sessionEnded = false
+        lastWinner = ""
+        hostKnown.clear()
+        hostBeginGame()
+        inGame = true
+        channelsOpen = true
+        socket.open()
+        socket.join(
+            downTopic(r.id),
+            RealtimeChannelListener(
+                onBroadcast = { _, _ -> },   // only the host speaks on "down"
+                // Every time "down" is (re)joined, everybody is told the game again.
+                onJoined = { hostAnnounceGame() }
+            )
+        )
+        syncHostMembers()
+        startPublisher()
+        startGameLoop()
+    }
+
+    /** Creates a fresh game with a new random assignment and the carried-over scores, and tells everybody. */
+    private fun hostBeginGame() {
+        val count = room?.playerCount ?: return
+        val order = drawAssignment(count)
+        val engine = LudoGame(tournament = order.size >= 3, connectActive = order)
+        engine.visualSink = { e -> onEngineEvent(e) }
+        resetLive()
+        for (seat in order.indices) engine.scores[order[seat]] = seatScores[seat]
+        playerOfSeat.clear()
+        playerOfSeat.addAll(order)
+        game = engine
+        gameNo++
+        lastSent = ""
+        publishStartToServer()
+        hostAnnounceGame()
+    }
+
+    /** Host: starts the next game of the same room. The scores follow the people to their new colours. */
+    private fun newGameFromHost() {
+        val old = game ?: return
+        for (seat in playerOfSeat.indices) seatScores[seat] = old.scores.getOrElse(playerOfSeat[seat]) { 0 }
+        hostBeginGame()
+    }
+
+    /** The "start" message of the current game: player count, game number, and who plays which colours. */
+    private fun startMessage(): JSONObject {
+        val order = playerOfSeat.toList()
+        val assignment = order.indices.map { seat ->
+            SeatAssignment(seat, order[seat], colorsOfSeat(seat).map { it.name })
+        }
+        return ConnectProtocol.start(order.size, assignment, gameNo)
+    }
+
+    /** Records game_no and the assignment on the server so guests and watchers can build the board from it. */
+    private fun publishStartToServer() {
+        val r = room ?: return
+        if (playerOfSeat.isEmpty()) return
+        val no = gameNo
+        val assignment = startMessage().optJSONArray("assignment") ?: return
+        val g = generation
+        scope.launch {
+            val reply = call(
+                "ludo_publish_start",
+                JSONObject().put("p_room", r.id).put("p_game_no", no).put("p_assignment", assignment)
+            )
+            // A failure is simply tried again by the 3-second roster loop (the server's game_no is behind).
+            if (g != generation) return@launch
+            val j = reply.json
+            if (j != null && !j.optBoolean("ok", false) && j.optString("reason", "") == "ended") {
+                showGameOver(MSG_ROOM_CLOSED)
+            }
+        }
+    }
+
+    /** Host: tells everybody on "down" which game this is and what it looks like now. */
+    private fun hostAnnounceGame() {
+        val r = room ?: return
+        if (!isHost || game == null || sessionEnded) return
+        socket.send(downTopic(r.id), ConnectProtocol.T_START, startMessage())
+        publish(force = true)
+    }
+
+    /**
+     * Host: makes sure there is an "up" channel (to hear the person) and a "to" channel (to answer them)
+     * for everybody in the roster, and drops the channels of people who are gone. A person that is new
+     * is sent the game as soon as the "to" channel is joined.
+     */
+    private fun syncHostMembers() {
+        val r = room ?: return
+        val me = myId() ?: return
+        val present = members.map { it.userId.lowercase() }.filter { it != me }.toSet()
+        for (uid in present) {
+            if (!hostKnown.add(uid)) continue
+            socket.join(
+                upTopic(r.id, uid),
+                RealtimeChannelListener(onBroadcast = { event, body -> hostOnUp(uid, event, body) })
+            )
+            socket.join(
+                toTopic(r.id, uid),
+                RealtimeChannelListener(
+                    onBroadcast = { _, _ -> },
+                    onJoined = { hostSendGameTo(uid) }
+                )
+            )
+        }
+        for (uid in hostKnown.toList()) {
+            if (uid in present) continue
+            hostKnown.remove(uid)
+            socket.leave(upTopic(r.id, uid))
+            socket.leave(toTopic(r.id, uid))
+        }
+    }
+
+    // ----- Host: keeping everybody in sync, carrying out taps -----
+
+    private fun startPublisher() {
+        publisherJob?.cancel()
+        val g = generation
+        publisherJob = scope.launch {
+            while (g == generation && isHost) {
+                delay(ONLINE_STATE_INTERVAL_MS)
+                publish(force = false)
+            }
+        }
+    }
+
+    /**
+     * Sends the game on "down" when it has changed (at most every [ONLINE_STATE_INTERVAL_MS], always the
+     * latest one). Moves in progress are not part of it: other phones see the board jump to each new state.
+     */
+    private fun publish(force: Boolean) {
+        val g = game ?: return
+        val r = room ?: return
+        if (!isHost || sessionEnded) return
+        if (g.phase == Phase.GameOver) {
+            for (seat in playerOfSeat.indices) seatScores[seat] = g.scores.getOrElse(playerOfSeat[seat]) { 0 }
+            if (g.winner >= 0) lastWinner = playerName(g.winner)
+        }
+        val snapshot = g.toMirrorJson()
+        val text = snapshot.toString()
+        if (!force && text == lastSent) return
+        lastSent = text
+        seq++
+        socket.send(downTopic(r.id), ConnectProtocol.T_STATE, ConnectProtocol.state(seq, gameNo, snapshot))
+    }
+
+    /** Host: sends one person the game (start, then the whole state) on their own "to" channel. */
+    private fun hostSendGameTo(userId: String) {
+        val r = room ?: return
+        val g = game ?: return
+        if (!isHost || sessionEnded) return
+        val to = toTopic(r.id, userId)
+        socket.send(to, ConnectProtocol.T_START, startMessage())
+        seq++
+        socket.send(to, ConnectProtocol.T_STATE, ConnectProtocol.state(seq, gameNo, g.toMirrorJson()))
+    }
+
+    private fun memberOf(userId: String): OnlineMember? =
+        members.firstOrNull { it.userId.equals(userId, ignoreCase = true) }
+
+    /** Something arrived on a person's "up" channel. [userId] comes from the topic, so it cannot be forged. */
+    private fun hostOnUp(userId: String, event: String, body: JSONObject) {
+        if (!isHost || game == null || sessionEnded) return
+        if (body.optInt("v", -1) != ConnectProtocol.PROTOCOL_VERSION) return
+        val member = memberOf(userId) ?: return
+        try {
+            when (event) {
+                ConnectProtocol.T_RESYNC -> hostSendGameTo(userId)
+                ConnectProtocol.T_INTENT -> hostIntent(member, body)
+                else -> Unit
+            }
+        } catch (e: Exception) {
+            // A bad message must never crash the app: drop it.
+        }
+    }
+
+    /** A tap from a person: read it carefully (it is untrusted), then queue it. Watchers have no seat, so their taps are dropped. */
+    private fun hostIntent(member: OnlineMember, msg: JSONObject) {
+        val seat = member.seat ?: return
+        if (member.role == OnlineRole.WATCHER) return
+        val intent = when (msg.optString("kind", "")) {
+            ConnectProtocol.K_ROLL -> HostIntent(seat, ConnectProtocol.K_ROLL)
+            ConnectProtocol.K_TIE_ROLL -> HostIntent(seat, ConnectProtocol.K_TIE_ROLL)
+            ConnectProtocol.K_NEXT_ROUND -> HostIntent(seat, ConnectProtocol.K_NEXT_ROUND)
+            ConnectProtocol.K_NEXT_GAME -> HostIntent(seat, ConnectProtocol.K_NEXT_GAME)
+            ConnectProtocol.K_SELECT_DIE ->
+                HostIntent(seat, ConnectProtocol.K_SELECT_DIE, i = msg.optInt("i", -1))
+            ConnectProtocol.K_BOARD_TAP -> {
+                val row = msg.optDouble("row", Double.NaN)
+                val col = msg.optDouble("col", Double.NaN)
+                if (row.isNaN() || col.isNaN() || row < -1.0 || row > 16.0 || col < -1.0 || col > 16.0) return
+                HostIntent(seat, ConnectProtocol.K_BOARD_TAP, row = row.toFloat(), col = col.toFloat())
+            }
+            ConnectProtocol.K_PICK_PIECE -> HostIntent(
+                seat, ConnectProtocol.K_PICK_PIECE,
+                color = msg.optString("color", ""), slot = msg.optInt("slot", -1)
+            )
+            else -> return
+        }
+        enqueue(intent)
+    }
+
+    /**
+     * Puts a tap in line. The rule functions of the engine wait for animations, so the queue is
+     * emptied by one coroutine, one tap at a time: two taps never run the engine at the same moment.
+     */
+    private fun enqueue(intent: HostIntent) {
+        if (!isHost || game == null || sessionEnded) return
+        if (queue.size >= MAX_QUEUE) return
+        queue.addLast(intent)
+        if (draining) return
+        val ui = uiScope ?: return
+        draining = true
+        val g = generation
+        runnerJob = ui.launch {
+            try {
+                while (queue.isNotEmpty() && g == generation) {
+                    val next = queue.removeFirst()
+                    try {
+                        process(next)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // A tap that cannot be carried out is dropped; the game goes on.
+                    }
+                }
+            } finally {
+                draining = false
+            }
+        }
+    }
+
+    /**
+     * Checks a tap against the live game and, only if it is allowed right now, calls the engine's own
+     * function for it. The sender's seat must be the player whose turn it is (for a tie-break roll: the
+     * player whose roll is next; for Next Round / next game: the host). Anything else is dropped silently,
+     * and the engine's own phase checks stay the final authority.
+     */
+    private suspend fun process(req: HostIntent) {
+        val g = game ?: return
+        if (!isHost || sessionEnded) return
+        val player = playerOfSeat.getOrElse(req.seat) { -1 }
+        if (player < 0) return
+        val myTurn = !g.bannerPending && g.overlay == TOverlay.NONE && g.activePlayer == player
+        when (req.kind) {
+            ConnectProtocol.K_ROLL ->
+                if (myTurn && g.phase == Phase.AwaitRoll) {
+                    announceHand(req.seat, player, HandTarget.Dice, g.firstColorOf(player))
+                    g.roll()
+                }
+            ConnectProtocol.K_SELECT_DIE ->
+                if (myTurn && g.phase == Phase.Choose && req.i in 0..2) {
+                    if (g.optionUsable(req.i)) {
+                        announceHand(req.seat, player, HandTarget.Orb(req.i), g.firstColorOf(player))
+                    }
+                    g.selectDie(req.i)
+                }
+            ConnectProtocol.K_BOARD_TAP ->
+                if (myTurn && (g.phase == Phase.AwaitRoll || g.phase == Phase.Choose)) {
+                    if (g.phase == Phase.AwaitRoll) {
+                        if (req.row in 6f..9f && req.col in 6f..9f) {
+                            announceHand(req.seat, player, HandTarget.Dice, g.firstColorOf(player))
+                        }
+                    } else {
+                        val hit = g.boardTapPiece(req.row, req.col)
+                        if (hit != null) announceHand(req.seat, player, g.handSpotOf(hit), hit.color)
+                    }
+                    g.onBoardTap(req.row, req.col)
+                }
+            ConnectProtocol.K_PICK_PIECE ->
+                if (myTurn && (g.phase == Phase.Choose || g.phase == Phase.CaptureChoose)) {
+                    val piece = g.pieces.firstOrNull { it.color.name == req.color && it.slot == req.slot }
+                    if (piece != null) {
+                        val spot = g.pickSpotOf(piece)
+                        if (spot != null) {
+                            announceHand(req.seat, player, spot, g.captureMoverColor() ?: piece.color)
+                        }
+                        g.onPiecePicked(piece)
+                    }
+                }
+            ConnectProtocol.K_TIE_ROLL ->
+                if (g.overlay == TOverlay.TIEBREAK && g.tieTurn == player) g.tieHumanRoll()
+            ConnectProtocol.K_NEXT_ROUND ->
+                if (req.seat == 0 && g.overlay == TOverlay.RESULT) g.resultNext()
+            ConnectProtocol.K_NEXT_GAME ->
+                if (req.seat == 0 && g.phase == Phase.GameOver) newGameFromHost()
+            else -> Unit
+        }
+    }
+
+    // ----- Live view, host side -----
+
+    /** Sends one "ev" on "down". Hand events (cosmetic, droppable) are skipped when too many went out. */
+    private fun sendEv(message: JSONObject, droppable: Boolean) {
+        val r = room ?: return
+        if (!isHost || game == null) return
+        val now = SystemClock.elapsedRealtime()
+        while (evTimes.isNotEmpty() && now - evTimes.first() > 1000L) evTimes.removeFirst()
+        if (droppable && evTimes.size >= MAX_EV_PER_SECOND) return
+        evTimes.addLast(now)
+        socket.send(downTopic(r.id), ConnectProtocol.T_EV, message)
+    }
+
+    /**
+     * The host's rules are about to animate something: tell everybody, at the moment it starts. The "seq" is
+     * the number the next snapshot will have, so a phone knows which snapshot to hold back until it has played it.
+     */
+    private fun onEngineEvent(e: VisualEvent) {
+        if (!isHost) return
+        val next = seq + 1
+        val message = when (e) {
+            is VisualEvent.Roll -> ConnectProtocol.evRoll(next, e.player, e.a, e.b)
+            is VisualEvent.Move -> ConnectProtocol.evMove(
+                next, e.piece.color.name, e.piece.slot, e.from, e.to, e.durationMs, e.rank
+            )
+            is VisualEvent.Capture -> ConnectProtocol.evCapture(
+                next, e.victim.color.name, e.victim.slot, e.mover.color.name, e.mover.slot
+            )
+            is VisualEvent.TieRoll -> ConnectProtocol.evTieRoll(next, e.player, e.value)
+        }
+        sendEv(message, false)
+    }
+
+    /**
+     * Tells everybody where [player]'s hand goes, just before the host carries out that (already checked)
+     * tap. The host shows the hand of another person's tap itself; its own taps get no hand on its own screen.
+     */
+    private fun announceHand(seat: Int, player: Int, target: HandTarget, color: LudoColor) {
+        sendEv(ConnectProtocol.evHand(seq + 1, player, color.name, target), true)
+        if (seat != 0) hand.add(target, color)
+    }
+
+    /** Forgets everything about animations and hands in progress (a new game, or the end of the session). */
+    private fun resetLive() {
+        animJob?.cancel()
+        animJob = null
+        safetyJob?.cancel()
+        safetyJob = null
+        anims.clear()
+        pendingSnapshot = null
+        pendingSeq = 0
+        busyUntil = 0L
+        visualsDirty = false
+        evTimes.clear()
+        hand.clear()
+    }
+
+    // ----- Host: End Game / End Tournament -----
+
+    /**
+     * Host: End Game / End Tournament. Everybody is told on "down", the room is closed on the server, and
+     * the host stays on a final panel until it presses OK.
+     */
+    override fun endForEveryone() {
+        val r = room ?: return
+        if (!isHost || !inGame || sessionEnded) return
+        val g = game
+        if (g != null && g.phase == Phase.GameOver && g.winner >= 0) lastWinner = playerName(g.winner)
+        val seats = (0 until playerOfSeat.size).toList()
+        val names = seats.map { seatName(it) }
+        val scores = seats.map { scoreOfSeat(it) }
+        sessionEnded = true
+        queue.clear()
+        runnerJob?.cancel()
+        runnerJob = null
+        draining = false
+        socket.send(downTopic(r.id), ConnectProtocol.T_ENDED, ConnectProtocol.ended(lastWinner, names, scores))
+        publisherJob?.cancel()
+        publisherJob = null
+        gameLoopJob?.cancel()
+        gameLoopJob = null
+        finalText = endedText(lastWinner, names, scores)
+        scope.launch { call("ludo_end_room", JSONObject().put("p_room", r.id)) }
+    }
+
+    /** The "Game ended" panel text: the winner of the last finished game (if any) and the scores. */
+    private fun endedText(winner: String, names: List<String>, scores: List<Int>): String {
+        val sb = StringBuilder("Game ended")
+        if (winner.isNotEmpty()) sb.append("\nWinner: ").append(winner)
+        if (names.isNotEmpty()) {
+            sb.append("\n")
+            sb.append(names.indices.joinToString("   ") { "${names[it]} ${scores.getOrElse(it) { 0 }}" })
+        }
+        return sb.toString()
+    }
+
+    // ----- Guests and watchers: entering the game, joining the channels -----
+
+    /** Builds the display model for game [no] and starts asking the host for its state. */
+    private fun buildDisplay(order: List<Int>, no: Int) {
+        resetLive()
+        playerOfSeat.clear()
+        playerOfSeat.addAll(order)
+        gameNo = no
+        lastSeq = 0
+        appliedGameNo = 0
+        game = LudoGame(tournament = order.size >= 3, connectActive = order)
+        inGame = true
+        startResyncLoop(no)
+    }
+
+    /** Enters the game recorded on the server (the room snapshot), whether or not the live "start" arrived. */
+    private fun guestEnterGame(r: OnlineRoom) {
+        buildDisplay(r.assignment, r.gameNo)
+        if (!channelsOpen) {
+            channelsOpen = true
+            guestOpenChannels(r)
+        }
+        if (gameLoopJob?.isActive != true) startGameLoop()
+    }
+
+    private fun guestOpenChannels(r: OnlineRoom) {
+        val me = myId() ?: return
+        val down = downTopic(r.id)
+        val to = toTopic(r.id, me)
+        val up = upTopic(r.id, me)
+        // Once all three channels are joined the host can hear us and answer us: ask for the game.
+        val ready: () -> Unit = {
+            if (socket.isJoined(down) && socket.isJoined(to) && socket.isJoined(up)) requestState()
+        }
+        socket.open()
+        socket.join(
+            down,
+            RealtimeChannelListener(onBroadcast = { event, body -> guestOnMessage(event, body) }, onJoined = ready)
+        )
+        socket.join(
+            to,
+            RealtimeChannelListener(onBroadcast = { event, body -> guestOnMessage(event, body) }, onJoined = ready)
+        )
+        socket.join(up, RealtimeChannelListener(onBroadcast = { _, _ -> }, onJoined = ready))
+    }
+
+    /** Asks the host to send the game again (start + the whole state) on this person's "to" channel. */
+    private fun requestState() {
+        if (isHost) return
+        sendUp(ConnectProtocol.resync())
+    }
+
+    /** Keeps asking every 2 seconds until the first state of this game is on screen. */
+    private fun startResyncLoop(no: Int) {
+        resyncJob?.cancel()
+        val g = generation
+        resyncJob = scope.launch {
+            var tries = 0
+            while (g == generation && !isHost && appliedGameNo != no && tries < MAX_RESYNC_TRIES) {
+                delay(RESYNC_WAIT_MS)
+                if (g == generation && appliedGameNo != no) {
+                    requestState()
+                    tries++
+                }
+            }
+        }
+    }
+
+    private fun guestOnMessage(event: String, body: JSONObject) {
+        if (isHost || body.optInt("v", -1) != ConnectProtocol.PROTOCOL_VERSION) return
+        try {
+            when (event) {
+                ConnectProtocol.T_START -> guestStart(body)
+                ConnectProtocol.T_STATE -> guestState(body)
+                ConnectProtocol.T_EV -> guestEvent(body)
+                ConnectProtocol.T_ENDED -> {
+                    freezeGame()
+                    myRoomRef = null
+                    finalText = MSG_GAME_ENDED
+                }
+                else -> Unit
+            }
+        } catch (e: Exception) {
+            // A bad message must never crash the app: drop it.
+        }
+    }
+
+    /** The host started a game (or the next one): build a fresh display model and wait for the first state. */
+    private fun guestStart(msg: JSONObject) {
+        if (!inGame && room?.status != "playing") return
+        val n = msg.optInt("playerCount", 0)
+        val order = parseOrder(msg.optJSONArray("assignment"), n) ?: return
+        val no = msg.optInt("gameNo", 0)
+        if (no <= 0 || no < gameNo) return
+        // The same game again (the host says it more than once): nothing to rebuild.
+        if (no == gameNo && game != null) return
+        buildDisplay(order, no)
+    }
+
+    /** A snapshot from the host. Older ones and ones of another game are dropped; a damaged one is ignored. */
+    private fun guestState(msg: JSONObject) {
+        if (game == null) return
+        val s = msg.optInt("seq", -1)
+        if (s <= lastSeq || msg.optInt("gameNo", -1) != gameNo) return
+        val snapshot = msg.optJSONObject("game") ?: return
+        val head = anims.firstOrNull()
+        if (head != null && s >= head.seq) {
+            // An animation that comes before this snapshot has still to play: keep only the newest one for later.
+            if (pendingSnapshot == null || s > pendingSeq) {
+                pendingSnapshot = snapshot
+                pendingSeq = s
+            }
+            return
+        }
+        applyGuestSnapshot(snapshot, s)
+    }
+
+    /**
+     * Puts a snapshot on screen: copies the values, drops the leftovers of any animation, and plays the
+     * round-win jingle once when the snapshot is the one that ends a round or the game.
+     */
+    private fun applyGuestSnapshot(snapshot: JSONObject, s: Int) {
+        val g = game ?: return
+        val first = lastSeq == 0
+        val before = g.phase
+        try {
+            g.applyMirror(snapshot)
+        } catch (e: Exception) {
+            return
+        }
+        if (anims.isEmpty()) {
+            // Nothing is playing: the animations' leftovers (a seed standing at its goal, dice faces) give way to the real board.
+            g.clearVisuals()
+            visualsDirty = false
+        }
+        lastSeq = s
+        appliedGameNo = gameNo
+        val ends = g.phase == Phase.GameOver || g.phase == Phase.RoundBreak
+        val wasEnd = before == Phase.GameOver || before == Phase.RoundBreak
+        if (ends && !wasEnd && !first) g.playJingle()
+    }
+
+    // ----- Live view, guest and watcher side -----
+
+    /**
+     * A live event from the host: either a hand to show, or an animation to play. Events are cosmetic: a
+     * damaged, late or lost one changes nothing, because the next snapshot always puts the board right.
+     */
+    private fun guestEvent(msg: JSONObject) {
+        val g = game ?: return
+        if (!inGame) return
+        val kind = msg.optString("k", "")
+        if (kind == ConnectProtocol.EV_HAND) {
+            val player = msg.optInt("player", -1)
+            if (player !in 0..3 || player == myPlayer) return   // the person's own hand is their finger
+            val target = ConnectProtocol.handTargetFromJson(msg.optJSONObject("target")) ?: return
+            val color = ConnectProtocol.colorFromName(msg.optString("color", "")) ?: return
+            hand.add(target, color)
+            return
+        }
+        if (uiScope == null) return   // no screen to animate on: the snapshots alone will do
+        val evSeq = msg.optInt("seq", -1)
+        if (evSeq <= lastSeq) return  // the snapshot that follows it is already on screen: too late to show it
+        val anim: Anim = when (kind) {
+            ConnectProtocol.EV_ROLL -> {
+                val a = msg.optInt("a", 0)
+                val b = msg.optInt("b", 0)
+                if (a !in 1..6 || b !in 1..6) return
+                Anim(kind, evSeq, v1 = a, v2 = b)
+            }
+            ConnectProtocol.EV_MOVE -> {
+                val color = msg.optString("color", "")
+                val slot = msg.optInt("slot", -1)
+                val from = msg.optInt("from", -99)
+                val to = msg.optInt("to", -99)
+                val ms = msg.optLong("durationMs", -1L)
+                if (g.pieceByName(color, slot) == null) return
+                if (from !in -1..55 || to !in 0..56 || to < from || ms !in 8L..8000L) return
+                Anim(kind, evSeq, v1 = from, v2 = to, color = color, slot = slot, durationMs = ms,
+                    rank = msg.optInt("rank", -1))
+            }
+            ConnectProtocol.EV_CAPTURE -> {
+                val color = msg.optString("color", "")
+                val slot = msg.optInt("slot", -1)
+                if (g.pieceByName(color, slot) == null) return
+                Anim(kind, evSeq, color = color, slot = slot,
+                    moverColor = msg.optString("mColor", ""), moverSlot = msg.optInt("mSlot", -1))
+            }
+            ConnectProtocol.EV_TIE_ROLL -> {
+                val player = msg.optInt("player", -1)
+                val value = msg.optInt("value", 0)
+                if (player !in 0..3 || value !in 1..6) return
+                Anim(kind, evSeq, v1 = player, v2 = value)
+            }
+            else -> return   // unknown kind: ignore
+        }
+        anims.addLast(anim)
+        busyUntil = maxOf(busyUntil, SystemClock.elapsedRealtime()) + HAND_LEAD_MS + expectedMs(anim)
+        armSafety()
+        runAnims()
+    }
+
+    /** About how long an animation takes, used only to size the safety timer. */
+    private fun expectedMs(a: Anim): Long = when (a.kind) {
+        ConnectProtocol.EV_MOVE -> a.durationMs + 300L
+        ConnectProtocol.EV_CAPTURE -> 600L
+        else -> 700L
+    }
+
+    /**
+     * How long to wait before an animation starts, so the hand of the person who acted gets there first.
+     * The person who acted never sees a hand, so for them the last hand is old and there is no wait.
+     */
+    private fun leadMs(a: Anim): Long {
+        if (a.kind == ConnectProtocol.EV_TIE_ROLL) return 0L
+        val at = hand.lastQueuedAt
+        if (at == 0L) return 0L
+        val waited = SystemClock.elapsedRealtime() - at
+        return (HAND_LEAD_MS - waited).coerceIn(0L, HAND_LEAD_MS)
+    }
+
+    /** Plays the queued animations one after the other on the screen's scope (it has the frame clock). */
+    private fun runAnims() {
+        if (animJob?.isActive == true) return
+        val ui = uiScope ?: return
+        val gen = generation
+        animJob = ui.launch {
+            while (gen == generation && anims.isNotEmpty()) {
+                val a = anims.first()
+                val g = game ?: break
+                val wait = leadMs(a)
+                if (wait > 0L) delay(wait)
+                if (gen != generation) return@launch
+                playAnim(g, a)
+                visualsDirty = true
+                anims.removeFirstOrNull()
+            }
+            if (gen == generation) animationsDone()
+        }
+    }
+
+    private suspend fun playAnim(g: LudoGame, a: Anim) {
+        when (a.kind) {
+            ConnectProtocol.EV_ROLL -> g.observeRoll(a.v1, a.v2)
+            ConnectProtocol.EV_MOVE -> {
+                val piece = g.pieceByName(a.color, a.slot)
+                if (piece != null) g.observeMove(piece, a.v1, a.v2, a.durationMs, a.rank)
+            }
+            ConnectProtocol.EV_CAPTURE -> {
+                val victim = g.pieceByName(a.color, a.slot)
+                if (victim != null) g.observeCapture(victim, g.pieceByName(a.moverColor, a.moverSlot))
+            }
+            ConnectProtocol.EV_TIE_ROLL -> g.observeTieRoll(a.v1, a.v2)
+            else -> Unit
+        }
+    }
+
+    /** Every queued animation has played: show the snapshot that was held back for them. */
+    private fun animationsDone() {
+        val snap = pendingSnapshot ?: return   // not here yet: it will be applied the moment it arrives
+        pendingSnapshot = null
+        applyGuestSnapshot(snap, pendingSeq)
+    }
+
+    /**
+     * Safety net: if the animations are not over well after they should have been (for example the screen
+     * stopped drawing), or no snapshot comes after them, stop waiting. Held snapshots are applied at once;
+     * otherwise the host is asked for a fresh one. A lost event can therefore never freeze this phone
+     * for more than about three seconds.
+     */
+    private fun armSafety() {
+        safetyJob?.cancel()
+        val g = generation
+        val wait = (busyUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L) + SAFETY_MS
+        safetyJob = scope.launch {
+            delay(wait)
+            if (g != generation || isHost) return@launch
+            if (anims.isEmpty() && pendingSnapshot == null && !visualsDirty) return@launch
+            animJob?.cancel()
+            animJob = null
+            anims.clear()
+            val snap = pendingSnapshot
+            if (snap != null) {
+                pendingSnapshot = null
+                applyGuestSnapshot(snap, pendingSeq)
+            } else {
+                requestState()
+            }
+        }
+    }
+
+    // ----- Every 3 seconds while a game is on screen -----
+
+    /**
+     * The slow loop of a game. Everybody re-reads the room: a new game number or the end of the room is
+     * noticed even if the live message was lost. The host also joins the channels of people who arrived
+     * meanwhile, repeats the server record if it is behind, and keeps the room from expiring.
+     */
+    private fun startGameLoop() {
+        gameLoopJob?.cancel()
+        val g = generation
+        gameLoopJob = scope.launch {
+            var sinceTouch = 0L
+            while (g == generation) {
+                delay(GAME_TICK_MS)
+                if (g != generation) return@launch
+                if (!foreground) continue
+                gameTick()
+                sinceTouch += GAME_TICK_MS
+                val r = room
+                if (isHost && r != null && sinceTouch >= TOUCH_EVERY_MS) {
+                    sinceTouch = 0L
+                    call("ludo_touch_room", JSONObject().put("p_room", r.id))
+                }
+            }
+        }
+    }
+
+    private suspend fun gameTick() {
+        val current = room ?: return
+        val reply = call("ludo_room_snapshot", JSONObject().put("p_room", current.id))
+        val j = reply.json
+        if (j == null) {
+            // Only a real network problem shows the banner; other errors are simply tried again.
+            if (reply.failure?.kind == OnlineException.Kind.NO_NETWORK) roomLink = OnlineLink.OFFLINE
+            return
+        }
+        roomLink = OnlineLink.OK
+        if (!inGame || room?.id != current.id || finalText != null) return
+        if (j.optBoolean("ok", false)) {
+            applySnapshot(j)
+        } else {
+            when (j.optString("reason", "")) {
+                "not_member" -> showGameOver("You are no longer in that room.")
+                "expired" -> showGameOver(reasonText("expired"))
+                "not_found" -> showGameOver(reasonText("ended"))
+                else -> Unit
+            }
+        }
+    }
+
+    // ----- Ending and leaving -----
+
+    /** Stops the loops and the socket but leaves the game on screen (a final message is about to cover it). */
+    private fun freezeGame() {
+        publisherJob?.cancel()
+        publisherJob = null
+        gameLoopJob?.cancel()
+        gameLoopJob = null
+        resyncJob?.cancel()
+        resyncJob = null
+        socket.close()
+    }
+
+    /** The game is over for this phone: it stays on screen under [text] and one OK button. */
+    private fun showGameOver(text: String) {
+        if (finalText != null) return
+        freezeGame()
+        myRoomRef = null
+        finalText = text
+    }
+
+    /** Forgets the whole game on this phone: loops, socket, engine, scores, messages. */
+    private fun stopGame() {
+        generation++
+        freezeGame()
+        runnerJob?.cancel()
+        runnerJob = null
+        queue.clear()
+        draining = false
+        resetLive()
+        channelsOpen = false
+        hostKnown.clear()
+        seq = 0
+        lastSent = ""
+        lastSeq = 0
+        appliedGameNo = 0
+        sessionEnded = false
+        lastWinner = ""
+        for (i in seatScores.indices) seatScores[i] = 0
+        game = null
+        inGame = false
+        gameNo = 0
+        playerOfSeat.clear()
+        finalText = null
+    }
+
+    /**
+     * Leaves the game on this phone (Exit for a guest or watcher, or OK on a final message). A watcher
+     * is told to the server so the place is free again; a player keeps the seat and can come back.
+     */
+    override fun leave() {
+        val r = room
+        val wasWatcher = myRole == OnlineRole.WATCHER
+        val closed = finalText != null
+        stopPolling()
+        clearLocal()
+        if (closed) myRoomRef = null
+        if (r != null && wasWatcher && !closed) {
+            scope.launch { call("ludo_leave_room", JSONObject().put("p_room", r.id)) }
+        }
+    }
+
+    private fun colorWord(c: LudoColor): String = when (c) {
+        LudoColor.RED -> "Red"
+        LudoColor.GREEN -> "Green"
+        LudoColor.YELLOW -> "Yellow"
+        LudoColor.BLUE -> "Blue"
+    }
+
     private companion object {
         /** How often the room screen asks the server for the room, in milliseconds. */
         const val POLL_INTERVAL_MS = 1500L
         const val MSG_GENERIC = "Something went wrong. Please try again."
         const val MSG_NO_NET = "Online needs an internet connection."
+        const val MSG_ROOM_CLOSED = "The host closed the room."
+        const val MSG_GAME_ENDED = "The host ended the game."
+
+        /** Tournament-style engine players 0..3 = red, green, yellow, blue. */
+        val TOURNAMENT_COLORS = listOf(LudoColor.RED, LudoColor.GREEN, LudoColor.YELLOW, LudoColor.BLUE)
+
+        const val GAME_TICK_MS = 3_000L
+        const val TOUCH_EVERY_MS = 60_000L
+        const val RESYNC_WAIT_MS = 2_000L
+        const val MAX_RESYNC_TRIES = 5
+        const val MAX_QUEUE = 40
+        const val MAX_EV_PER_SECOND = 10
+        const val SAFETY_MS = 3_000L
+        val HAND_LEAD_MS = ConnectSession.HAND_LEAD_MS
     }
 }

@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.westly.ludo.connect.ConnectSession
 import com.westly.ludo.connect.LinkState
+import com.westly.ludo.connect.LiveSession
 import com.westly.ludo.game.LudoColor
 import com.westly.ludo.game.LudoGame
 import com.westly.ludo.game.GameSettings
@@ -70,6 +71,7 @@ import com.westly.ludo.ui.ConnectCountScreen
 import com.westly.ludo.ui.ConnectDialog
 import com.westly.ludo.ui.ConnectMenuDialog
 import com.westly.ludo.ui.ConnectQrDialog
+import com.westly.ludo.ui.OnlineCodeDialog
 import com.westly.ludo.ui.ConnectResumeScreen
 import com.westly.ludo.ui.ConnectWaitBanner
 import com.westly.ludo.ui.ConnectNotice
@@ -272,7 +274,10 @@ fun LudoApp(
     }
 
     // The screen's coroutine scope has the frame clock the host needs to run move animations.
-    SideEffect { connect.bindScope(scope) }
+    SideEffect {
+        connect.bindScope(scope)
+        onlineSession.bindScope(scope)
+    }
     // A line for the Offline screen, for example "The host ended the game." after a game was closed.
     var connectNotice by remember { mutableStateOf<String?>(null) }
 
@@ -302,13 +307,22 @@ fun LudoApp(
         }
     }
 
+    // The game started (or this phone came back to a running one): the room screen gives way to the game.
+    LaunchedEffect(onlineSession.inGame, screen) {
+        if (onlineSession.inGame && screen == "online_room") screen = "online_game"
+    }
+    // The online game is over for this phone and its screen was left: back to the Online menu.
+    LaunchedEffect(onlineSession.inGame) {
+        if (!onlineSession.inGame && screen == "online_game") screen = "online"
+    }
+
     BackHandler(enabled = screen != "intro" && screen != "home") {
         screen = when (screen) {
             "game", "tournament", "family", "family_count" -> "modes"
             "family_names" -> "family_count"
             "connect" -> "modes"
             "online" -> "connect"
-            "online_create", "online_join", "online_room" -> "online"
+            "online_create", "online_join", "online_room", "online_game" -> "online"
             "connect_game" -> "connect_offline"
             "connect_offline" -> "connect"
             "connect_count", "connect_host", "connect_join", "connect_resume" -> "connect_offline"
@@ -387,6 +401,15 @@ fun LudoApp(
                     onlineSession,
                     onClosed = { screen = "online" }
                 )
+                "online_game" -> onlineSession.game?.let { og ->
+                    KeepScreenOn()
+                    LudoScreen(
+                        og, scope, names, settings,
+                        onModes = { screen = "online" },
+                        onHome = { screen = "online" },
+                        connect = onlineSession
+                    )
+                }
                 "connect_offline" -> ConnectOfflineScreen(
                     onBack = {
                         connectNotice = null
@@ -545,7 +568,7 @@ fun LudoScreen(
     onModes: () -> Unit,
     onHome: () -> Unit,
     onEndFamily: () -> Unit = {},
-    connect: ConnectSession? = null
+    connect: LiveSession? = null
 ) {
     // Connect and Play: names come from the room, taps go to the session (host or guest), and a guest's
     // game is only a display model. Every other mode passes null and behaves exactly as before.
@@ -1003,14 +1026,20 @@ fun LudoScreen(
                 onClose = { dialog = "none" },
                 watchersOn = cs.allowWatchers,
                 onToggleWatchers = { cs.switchWatchers(!cs.allowWatchers) },
-                onShowQr = { dialog = "connectQr" }
+                onShowQr = { dialog = "connectQr" },
+                showRoomCode = cs.isOnline,
+                canToggleWatchers = cs.canToggleWatchers
             )
-            "connectQr" -> ConnectQrDialog(
-                ticketText = cs.ticketText,
-                watching = cs.watcherCount,
-                allowWatchers = cs.allowWatchers,
-                onClose = { dialog = "connectMenu" }
-            )
+            "connectQr" -> if (cs.isOnline) {
+                OnlineCodeDialog(code = cs.onlineRoomCode.orEmpty(), onClose = { dialog = "connectMenu" })
+            } else {
+                ConnectQrDialog(
+                    ticketText = cs.ticketText,
+                    watching = cs.watcherCount,
+                    allowWatchers = cs.allowWatchers,
+                    onClose = { dialog = "connectMenu" }
+                )
+            }
             "connectLeave" -> ConnectDialog(
                 "Leave the game? You can come back later.",
                 "Leave", onPrimary = {

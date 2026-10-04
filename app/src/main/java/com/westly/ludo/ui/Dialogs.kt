@@ -353,17 +353,29 @@ fun ConnectMenuDialog(
     /** Host only: Show QR code and the Allow watchers switch. */
     watchersOn: Boolean = false,
     onToggleWatchers: () -> Unit = {},
-    onShowQr: () -> Unit = {}
+    onShowQr: () -> Unit = {},
+    /** Online: the second button shows the room code (with Share code) instead of a QR code. */
+    showRoomCode: Boolean = false,
+    /** Online: watchers are fixed when the room is made, so the switch is left out. */
+    canToggleWatchers: Boolean = true
 ) {
     BackHandler(true) { onClose() }
     Scrim {
         Panel(MenuPanel, 0.86f) { k ->
-            val labels = if (isHost) {
-                listOf(endLabel, "Show QR code", if (watchersOn) "Watchers: On" else "Watchers: Off", "Exit")
-            } else {
-                listOf("Exit")
+            val labels = ArrayList<String>()
+            val actions = ArrayList<() -> Unit>()
+            if (isHost) {
+                labels.add(endLabel)
+                actions.add(onEnd)
+                labels.add(if (showRoomCode) "Show room code" else "Show QR code")
+                actions.add(onShowQr)
+                if (canToggleWatchers) {
+                    labels.add(if (watchersOn) "Watchers: On" else "Watchers: Off")
+                    actions.add(onToggleWatchers)
+                }
             }
-            val actions = if (isHost) listOf(onEnd, onShowQr, onToggleWatchers, onExit) else listOf(onExit)
+            labels.add("Exit")
+            actions.add(onExit)
             val ys = listOf(132f, 276f, 420f, 564f)
             for (i in 0 until 4) {
                 if (i < labels.size) {
