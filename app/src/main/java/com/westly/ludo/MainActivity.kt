@@ -61,6 +61,7 @@ import com.westly.ludo.game.PlayerNames
 import com.westly.ludo.game.Sounds
 import com.westly.ludo.game.TOverlay
 import com.westly.ludo.online.OnlineAuth
+import com.westly.ludo.online.OnlineSession
 import com.westly.ludo.ui.AccountDialog
 import com.westly.ludo.ui.BoardThemes
 import com.westly.ludo.ui.ChangeNamesDialog
@@ -89,6 +90,9 @@ import com.westly.ludo.ui.KeepScreenOn
 import com.westly.ludo.ui.YouAreLabel
 import com.westly.ludo.ui.MenuDialog
 import com.westly.ludo.ui.NeriboFooter
+import com.westly.ludo.ui.OnlineCreateScreen
+import com.westly.ludo.ui.OnlineJoinScreen
+import com.westly.ludo.ui.OnlineRoomScreen
 import com.westly.ludo.ui.OnlineScreen
 import com.westly.ludo.ui.ResignDialog
 import com.westly.ludo.ui.RoundBanner
@@ -141,6 +145,11 @@ class MainActivity : ComponentActivity() {
         OnlineAuth(applicationContext, getSharedPreferences("ludomate_online", Context.MODE_PRIVATE))
     }
 
+    // Online rooms (Start a Room / Join a Room). Owned here too, so the room survives moving between screens.
+    private val onlineSession by lazy {
+        OnlineSession(applicationContext, getSharedPreferences("ludomate_online", Context.MODE_PRIVATE), online)
+    }
+
     private fun saveGame() {
         prefs().edit()
             .putString("save", game.toSaveString())
@@ -171,6 +180,7 @@ class MainActivity : ComponentActivity() {
                 game, tournament, names, settings,
                 connect = connect,
                 online = online,
+                onlineSession = onlineSession,
                 familyGame = family,
                 onFamilyCreate = { count, list ->
                     family = LudoGame(tournament = count >= 3, familyPlayers = count).also { it.setFamilyNames(list) }
@@ -187,12 +197,15 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         saveGame()
+        // The room screen stops asking the server while the app is in the background.
+        onlineSession.onAppBackground()
     }
 
     override fun onResume() {
         super.onResume()
         // A guest whose phone was locked checks its link to the host; a host makes sure it is still advertising.
         connect.onAppForeground()
+        onlineSession.onAppForeground()
     }
 
     override fun onStop() {
@@ -205,6 +218,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         // Stop advertising / searching and close every nearby connection.
         connect.release()
+        onlineSession.release()
         super.onDestroy()
     }
 }
@@ -218,6 +232,7 @@ fun LudoApp(
     settings: GameSettings,
     connect: ConnectSession,
     online: OnlineAuth,
+    onlineSession: OnlineSession,
     familyGame: LudoGame? = null,
     onFamilyCreate: (Int, List<String>) -> Unit = { _, _ -> },
     onFamilyEnd: () -> Unit = {}
@@ -241,7 +256,18 @@ fun LudoApp(
     LaunchedEffect(online.user) {
         if (online.user == null) {
             showAccount = false
-            if (screen == "online") screen = "connect"
+            onlineSession.reset()
+            if (screen == "online" || screen.startsWith("online_")) screen = "connect"
+        }
+    }
+    // Old messages do not follow the player from one Online screen to the next.
+    LaunchedEffect(screen) {
+        when (screen) {
+            "online" -> onlineSession.clearProblem()
+            "online_create", "online_join", "online_room", "connect" -> {
+                onlineSession.clearProblem()
+                onlineSession.clearNotice()
+            }
         }
     }
 
@@ -282,6 +308,7 @@ fun LudoApp(
             "family_names" -> "family_count"
             "connect" -> "modes"
             "online" -> "connect"
+            "online_create", "online_join", "online_room" -> "online"
             "connect_game" -> "connect_offline"
             "connect_offline" -> "connect"
             "connect_count", "connect_host", "connect_join", "connect_resume" -> "connect_offline"
@@ -340,7 +367,25 @@ fun LudoApp(
                 "online" -> OnlineScreen(
                     account = online.user,
                     playerName = names[0],
-                    onBack = { screen = "connect" }
+                    session = onlineSession,
+                    onBack = { screen = "connect" },
+                    onCreate = { screen = "online_create" },
+                    onJoin = { screen = "online_join" },
+                    onReturn = { screen = "online_room" }
+                )
+                "online_create" -> OnlineCreateScreen(
+                    onlineSession, names[0],
+                    onBack = { screen = "online" },
+                    onRoom = { screen = "online_room" }
+                )
+                "online_join" -> OnlineJoinScreen(
+                    onlineSession, names[0],
+                    onBack = { screen = "online" },
+                    onRoom = { screen = "online_room" }
+                )
+                "online_room" -> OnlineRoomScreen(
+                    onlineSession,
+                    onClosed = { screen = "online" }
                 )
                 "connect_offline" -> ConnectOfflineScreen(
                     onBack = {
