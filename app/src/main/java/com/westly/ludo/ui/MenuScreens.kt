@@ -168,9 +168,9 @@ internal fun GlossButton(
     }
 }
 
-/** Google "G" mark. Visual only: it has no click handler and signs nobody in. */
+/** Google "G" mark. HomeScreen makes it a button: it opens the sign-in panel, or the account dialog when signed in. */
 @Composable
-private fun GoogleGIcon(size: Dp, modifier: Modifier = Modifier) {
+internal fun GoogleGIcon(size: Dp, modifier: Modifier = Modifier) {
     Canvas(modifier.size(size)) {
         val s = this.size.minDimension
         val c = Offset(s / 2f, s / 2f)
@@ -237,13 +237,29 @@ private fun LudoMateLogo(u: Dp) {
 }
 
 @Composable
-fun HomeScreen(onSettings: () -> Unit, onGame: () -> Unit) {
+fun HomeScreen(
+    onSettings: () -> Unit,
+    onGame: () -> Unit,
+    /** The signed-in player's name, or null when nobody is signed in. */
+    accountName: String? = null,
+    onAccount: () -> Unit = {}
+) {
     MenuBackground(R.drawable.bg_home) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val u = minOf(maxWidth / 100f, maxHeight / 185f)
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Row(Modifier.fillMaxWidth().padding(u * 3f)) {
-                    GoogleGIcon(u * 11f)
+                    // Signed out: the Google "G". Signed in: a round badge with the first letter of the name.
+                    val accountTap = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onAccount
+                    )
+                    if (accountName == null) {
+                        GoogleGIcon(u * 11f, accountTap)
+                    } else {
+                        AccountLetterCircle(u * 11f, accountName, accountTap)
+                    }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     LudoMateLogo(u)

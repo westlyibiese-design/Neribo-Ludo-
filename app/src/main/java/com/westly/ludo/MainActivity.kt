@@ -60,6 +60,8 @@ import com.westly.ludo.game.Phase
 import com.westly.ludo.game.PlayerNames
 import com.westly.ludo.game.Sounds
 import com.westly.ludo.game.TOverlay
+import com.westly.ludo.online.OnlineAuth
+import com.westly.ludo.ui.AccountDialog
 import com.westly.ludo.ui.BoardThemes
 import com.westly.ludo.ui.ChangeNamesDialog
 import com.westly.ludo.ui.ConfigurationScreen
@@ -87,10 +89,12 @@ import com.westly.ludo.ui.KeepScreenOn
 import com.westly.ludo.ui.YouAreLabel
 import com.westly.ludo.ui.MenuDialog
 import com.westly.ludo.ui.NeriboFooter
+import com.westly.ludo.ui.OnlineScreen
 import com.westly.ludo.ui.ResignDialog
 import com.westly.ludo.ui.RoundBanner
 import com.westly.ludo.ui.RoundResultDialog
 import com.westly.ludo.ui.RulesScreen
+import com.westly.ludo.ui.SignInPanel
 import com.westly.ludo.ui.SkipButton
 import com.westly.ludo.ui.SoundVibrationScreen
 import com.westly.ludo.ui.TieBreakDialog
@@ -131,6 +135,12 @@ class MainActivity : ComponentActivity() {
     // Connect and Play (nearby phones). Owned here, not by a screen, so moving between screens keeps the link.
     private val connect by lazy { ConnectSession(applicationContext, prefs()) }
 
+    // Online play: the Google / Supabase sign-in. Owned here so the session survives moving between screens.
+    // Its session is kept in its own file, which is left out of cloud backups.
+    private val online by lazy {
+        OnlineAuth(applicationContext, getSharedPreferences("ludomate_online", Context.MODE_PRIVATE))
+    }
+
     private fun saveGame() {
         prefs().edit()
             .putString("save", game.toSaveString())
@@ -160,6 +170,7 @@ class MainActivity : ComponentActivity() {
             LudoApp(
                 game, tournament, names, settings,
                 connect = connect,
+                online = online,
                 familyGame = family,
                 onFamilyCreate = { count, list ->
                     family = LudoGame(tournament = count >= 3, familyPlayers = count).also { it.setFamilyNames(list) }
@@ -206,6 +217,7 @@ fun LudoApp(
     names: PlayerNames,
     settings: GameSettings,
     connect: ConnectSession,
+    online: OnlineAuth,
     familyGame: LudoGame? = null,
     onFamilyCreate: (Int, List<String>) -> Unit = { _, _ -> },
     onFamilyEnd: () -> Unit = {}
@@ -219,6 +231,19 @@ fun LudoApp(
     var connectCount by rememberSaveable { mutableStateOf(2) }
     // The join screen was opened by the Rejoin button (no scanning).
     var connectRejoin by rememberSaveable { mutableStateOf(false) }
+
+    // Online play: the sign-in panel and the account dialog float over whatever screen is showing.
+    var showSignIn by rememberSaveable { mutableStateOf(false) }
+    var showAccount by rememberSaveable { mutableStateOf(false) }
+    // The player tapped Online while signed out: after a successful sign-in, go on to the Online screen.
+    var openOnlineAfterSignIn by rememberSaveable { mutableStateOf(false) }
+    // Signed out (or the server dropped the session) while on the Online screen: back to the Connect menu.
+    LaunchedEffect(online.user) {
+        if (online.user == null) {
+            showAccount = false
+            if (screen == "online") screen = "connect"
+        }
+    }
 
     // The screen's coroutine scope has the frame clock the host needs to run move animations.
     SideEffect { connect.bindScope(scope) }
@@ -256,6 +281,7 @@ fun LudoApp(
             "game", "tournament", "family", "family_count" -> "modes"
             "family_names" -> "family_count"
             "connect" -> "modes"
+            "online" -> "connect"
             "connect_game" -> "connect_offline"
             "connect_offline" -> "connect"
             "connect_count", "connect_host", "connect_join", "connect_resume" -> "connect_offline"
@@ -268,7 +294,19 @@ fun LudoApp(
         Crossfade(targetState = screen, animationSpec = tween(400), label = "screen") { s ->
             when (s) {
                 "intro" -> NeriboIntro { screen = "home" }
-                "home" -> HomeScreen(onSettings = { screen = "settings" }, onGame = { screen = "modes" })
+                "home" -> HomeScreen(
+                    onSettings = { screen = "settings" },
+                    onGame = { screen = "modes" },
+                    accountName = online.user?.name,
+                    onAccount = {
+                        if (online.user == null) {
+                            openOnlineAfterSignIn = false
+                            showSignIn = true
+                        } else {
+                            showAccount = true
+                        }
+                    }
+                )
                 "settings" -> SettingsScreen(
                     names,
                     onSound = { screen = "sound" },
@@ -289,7 +327,20 @@ fun LudoApp(
                 )
                 "connect" -> ConnectMenuScreen(
                     onBack = { screen = "modes" },
-                    onOffline = { screen = "connect_offline" }
+                    onOffline = { screen = "connect_offline" },
+                    onOnline = {
+                        if (online.user != null) {
+                            screen = "online"
+                        } else {
+                            openOnlineAfterSignIn = true
+                            showSignIn = true
+                        }
+                    }
+                )
+                "online" -> OnlineScreen(
+                    account = online.user,
+                    playerName = names[0],
+                    onBack = { screen = "connect" }
                 )
                 "connect_offline" -> ConnectOfflineScreen(
                     onBack = {
@@ -380,6 +431,31 @@ fun LudoApp(
         // © line at the same spot on every page (the intro already shows its own © line).
         if (screen != "intro") {
             NeriboFooter(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 4.dp))
+        }
+        if (showSignIn) {
+            SignInPanel(
+                online,
+                onSuccess = {
+                    showSignIn = false
+                    if (openOnlineAfterSignIn) screen = "online"
+                    openOnlineAfterSignIn = false
+                },
+                onClose = {
+                    showSignIn = false
+                    openOnlineAfterSignIn = false
+                }
+            )
+        }
+        val account = online.user
+        if (showAccount && account != null) {
+            AccountDialog(
+                account,
+                onSignOut = {
+                    showAccount = false
+                    scope.launch { online.signOut() }
+                },
+                onClose = { showAccount = false }
+            )
         }
     }
 }

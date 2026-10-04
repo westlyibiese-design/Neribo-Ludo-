@@ -142,7 +142,7 @@ private fun Context.findActivity(): Activity? {
 
 /** Connect and Play: Offline works, Online is reserved for later. */
 @Composable
-fun ConnectMenuScreen(onBack: () -> Unit, onOffline: () -> Unit) {
+fun ConnectMenuScreen(onBack: () -> Unit, onOffline: () -> Unit, onOnline: () -> Unit = {}) {
     ConnectFrame("Connect and Play", 66f, onBack) { u ->
         Spacer(Modifier.height(u * 8f))
         GlossButton(
@@ -150,7 +150,10 @@ fun ConnectMenuScreen(onBack: () -> Unit, onOffline: () -> Unit) {
             subtitle = "Nearby phones, no internet", onClick = onOffline
         )
         Spacer(Modifier.height(u * 4f))
-        GlossButton("Online", Palette.Orange, u * 78f, u * 18f, subtitle = "Coming soon", dimmed = true)
+        GlossButton(
+            "Online", Palette.Orange, u * 78f, u * 18f,
+            subtitle = "Play with friends, anywhere", onClick = onOnline
+        )
     }
 }
 
