@@ -12,6 +12,7 @@ import com.westly.ludo.connect.ConnectSession
 import com.westly.ludo.connect.LinkState
 import com.westly.ludo.connect.LiveSession
 import com.westly.ludo.connect.RemoteHandPlayer
+import com.westly.ludo.connect.RosterEntry
 import com.westly.ludo.connect.SeatAssignment
 import com.westly.ludo.game.HandTarget
 import com.westly.ludo.game.LudoColor
@@ -54,8 +55,16 @@ data class OnlineRoom(
     /** 0 until the host has started the first game, then 1, 2, ... */
     val gameNo: Int = 0,
     /** The engine player of each seat in the current game (index = seat), empty until a game is recorded. */
-    val assignment: List<Int> = emptyList()
+    val assignment: List<Int> = emptyList(),
+    /** The result of the last finished game (or of the whole session once it was ended), if the host stored one. */
+    val result: OnlineResult? = null
 )
+
+/** What the server stores about the last finished game: the winner and every person's score, in seat order. */
+class OnlineResult(val winnerName: String, val names: List<String>, val scores: List<Int>, val gameNo: Int)
+
+/** The hosted game this phone can resume (drives the "Resume hosted game" button). */
+class OnlineHostSave(val userId: String, val roomId: String, val code: String, val playerCount: Int)
 
 /** One person in the room. [seat] is null for a watcher; seat 0 is the host. */
 data class OnlineMember(val userId: String, val seat: Int?, val role: OnlineRole, val name: String)
@@ -147,6 +156,18 @@ class OnlineSession(
     var offerWatchCode by mutableStateOf<String?>(null)
         private set
 
+    /** A "Game ended" panel for the Online screens: somebody tried to return to a room that was already closed. */
+    var endedPanel by mutableStateOf<String?>(null)
+        private set
+
+    /** The hosted game that can be resumed on this phone, or null (drives the "Resume hosted game" button). */
+    var hostSave by mutableStateOf<OnlineHostSave?>(null)
+        private set
+
+    init {
+        hostSave = readHostSaveInfo()
+    }
+
     // ---------------------------------------------------------------------------------------
     // App lifecycle
     // ---------------------------------------------------------------------------------------
@@ -154,14 +175,22 @@ class OnlineSession(
     fun onAppForeground() {
         foreground = true
         if (inGame && finalText == null) {
-            // A phone that slept may have lost its socket: connect again and ask for the game.
+            // A phone that slept may have lost its socket without being told: connect again, check that
+            // the connection really answers, and ask for the game.
             socket.ensureConnected()
+            socket.probe()
+            socketLostSince = 0L
             if (!isHost) requestState()
         }
     }
 
     fun onAppBackground() {
         foreground = false
+    }
+
+    /** Host: writes the running game to the saved settings now (the app is going to the background). */
+    fun saveHostNow() {
+        persistHost()
     }
 
     /** Stops polling and any call in progress. Called when the activity is destroyed. */
@@ -178,6 +207,7 @@ class OnlineSession(
         myRoomRef = null
         conflict = null
         offerWatchCode = null
+        endedPanel = null
         problem = null
         notice = null
     }
@@ -196,6 +226,10 @@ class OnlineSession(
 
     fun dismissOfferWatch() {
         offerWatchCode = null
+    }
+
+    fun dismissEnded() {
+        endedPanel = null
     }
 
     // ---------------------------------------------------------------------------------------
@@ -218,7 +252,39 @@ class OnlineSession(
             } else {
                 null
             }
+            // A saved hosted game whose room is over (ended, expired, or this person is no longer its host).
+            val save = hostSave
+            val ref = myRoomRef
+            if (save != null && save.userId.equals(auth.user?.id.orEmpty(), ignoreCase = true) &&
+                !(ref != null && ref.roomId == save.roomId && ref.role == OnlineRole.HOST)
+            ) {
+                clearHostSave()
+                notice = MSG_HOST_GAME_OVER
+            }
         }
+    }
+
+    /** The hosted game this phone can resume right now, or null: the save is this person's and the server still says they host that room. */
+    val resumeOffer: OnlineHostSave?
+        get() {
+            val save = hostSave ?: return null
+            val ref = myRoomRef ?: return null
+            if (!save.userId.equals(auth.user?.id.orEmpty(), ignoreCase = true)) return null
+            return if (ref.roomId == save.roomId && ref.role == OnlineRole.HOST && ref.status == "playing") save else null
+        }
+
+    /**
+     * The Resume hosted game button. The room is opened like for Return to room; because this phone is the
+     * host of a game that is already running, [afterSnapshot] rebuilds the game from the saved one.
+     */
+    fun resumeHosted(onDone: (Boolean) -> Unit) {
+        val save = resumeOffer
+        if (save == null) {
+            notice = MSG_HOST_GAME_OVER
+            onDone(false)
+            return
+        }
+        openRoom(save.roomId, onDone)
     }
 
     /** Start a Room. [onDone] gets true when the room exists and this phone is in it. */
@@ -334,6 +400,7 @@ class OnlineSession(
                 } else {
                     proceed = true
                     myRoomRef = null
+                    if (c.role == OnlineRole.HOST) clearHostSave()
                 }
             } finally {
                 busy = false
@@ -384,6 +451,7 @@ class OnlineSession(
                 busy = false
             }
             myRoomRef = null
+            clearHostSave()
             clearLocal()
             onDone()
         }
@@ -427,6 +495,7 @@ class OnlineSession(
         } else {
             when (j.optString("reason", "")) {
                 "not_member" -> closeRoom("You are no longer in that room.")
+                "removed" -> closeRoom(reasonText("removed"))
                 "expired" -> closeRoom(reasonText("expired"))
                 "not_found" -> closeRoom(reasonText("ended"))
                 else -> {
@@ -490,6 +559,9 @@ class OnlineSession(
             )
         } else if (reason == "full" && joinCode != null && j.optBoolean("watchers_available", false)) {
             offerWatchCode = joinCode
+        } else if (reason == "ended" || reason == "expired") {
+            // The room is over: show the stored result, even if the host's phone is long gone.
+            endedPanel = resultText(parseResult(j.optJSONObject("result")))
         } else {
             problem = reasonText(reason)
         }
@@ -539,15 +611,31 @@ class OnlineSession(
                 problem = MSG_GENERIC
                 return false
             }
+            // Resuming a hosted game that could not be rebuilt closes the room (see afterSnapshot).
+            if (room == null) return false
             if (room?.status == "ended") {
+                val shown = room?.result
                 clearLocal()
-                notice = reasonText("ended")
+                myRoomRef = null
+                if (hostSave?.roomId == roomId) clearHostSave()
+                endedPanel = resultText(shown)
                 return false
             }
             roomLink = OnlineLink.OK
             return true
         }
         val reason = j.optString("reason", "")
+        if (hostSave?.roomId == roomId && reason != "not_signed_in") {
+            clearHostSave()
+            notice = MSG_HOST_GAME_OVER
+            myRoomRef = null
+            return false
+        }
+        if (reason == "ended" || reason == "expired") {
+            endedPanel = resultText(parseResult(j.optJSONObject("result")))
+            myRoomRef = null
+            return false
+        }
         notice = if (reason == "not_member") "You are no longer in that room." else reasonText(reason)
         return false
     }
@@ -564,7 +652,8 @@ class OnlineSession(
                 status = r.getString("status"),
                 hostId = r.optString("host_id", ""),
                 gameNo = r.optInt("game_no", 0),
-                assignment = parseOrder(r.optJSONArray("assignment"), r.getInt("player_count")) ?: emptyList()
+                assignment = parseOrder(r.optJSONArray("assignment"), r.getInt("player_count")) ?: emptyList(),
+                result = parseResult(r.optJSONObject("result"))
             )
             val array = j.getJSONArray("members")
             val list = ArrayList<OnlineMember>()
@@ -609,7 +698,7 @@ class OnlineSession(
         "started" -> "That game has already started."
         "watchers_full" -> "No watcher places are left in this room."
         "watchers_off" -> "This room does not allow watchers."
-        "removed" -> "The host removed you from that room."
+        "removed" -> "You were removed by the host."
         "not_signed_in" -> "Please sign in with Google again."
         else -> MSG_GENERIC
     }
@@ -637,6 +726,14 @@ class OnlineSession(
     // "to:<me>" and "up:<me>", and as soon as all three are joined they send "resync"; the host
     // answers on "to:<me>". The resync is repeated every 2 seconds until the first state is on screen
     // and is sent again every time the channels are joined again (after a lost connection).
+    //
+    // Phase 4 (leave and return). Everybody also tracks Presence on "down" (key = user id). The host reads
+    // it to see which phones are connected and publishes the per-seat flags (connected / out / removed) in
+    // the "roster" part of every state; guests read the host's presence to know whether the host is gone.
+    // A phone that lost its connection shows "Reconnecting..." (then Try again after 30 s); a vanished host
+    // shows "Waiting for the host..." until it is back. The host saves the running game on this phone so
+    // "Resume hosted game" can rebuild it; the result of every finished game is stored on the server so
+    // people who come back later still see the winner, even if the host's phone is off.
     //
     // The sender of a tap is the user id in the "up" topic, which the server checks against the
     // caller. The host maps it to a seat through the roster and never reads a seat from a message.
@@ -691,6 +788,24 @@ class OnlineSession(
     private val hostKnown = HashSet<String>()
     private val evTimes = ArrayDeque<Long>()
 
+    // Host, Phase 4
+    /** People the host removed: seat -> name. They are no longer in the room list, so this keeps their name and flag. */
+    private val removedInfo = HashMap<Int, String>()
+
+    /** The user ids Presence says are connected (lower case), or null while Presence is not known. */
+    private var presentUids: Set<String>? = null
+
+    /** When each person was last seen in Presence (or first expected); a short absence is not yet "disconnected". */
+    private val lastSeenAt = HashMap<String, Long>()
+
+    /** The game number whose result is stored on the server, and when the last attempt was made. */
+    private var resultStoredNo = 0
+    private var resultAttemptAt = 0L
+
+    /** The game changed since it was last saved on this phone, and when it was last saved. */
+    private var saveDirty = false
+    private var lastSaveAt = 0L
+
     // Everybody
     private var gameLoopJob: Job? = null
     private var channelsOpen = false
@@ -699,6 +814,11 @@ class OnlineSession(
     private var resyncJob: Job? = null
     private var lastSeq = 0
     private var appliedGameNo = 0
+    private var linkJob: Job? = null
+    private var socketLostSince = 0L
+    private var hostMissingSince = 0L
+    private var hostPresenceReady = false
+    private var hostPresent = false
 
     /** One animation a phone has been told to play. [seq] is the snapshot that follows it. */
     private class Anim(
@@ -756,14 +876,60 @@ class OnlineSession(
     /** Online watchers are chosen when the room is made, so this only says whether there are watcher places. */
     override val allowWatchers: Boolean get() = (room?.maxWatchers ?: 0) > 0
 
-    /** Removing people is a later phase. */
-    override val hasRemoved: Boolean get() = false
+    /** True when somebody was removed by the host (no new game can start then). */
+    override val hasRemoved: Boolean get() = flags.any { it.removed }
 
-    /** Waiting for a dropped phone is a later phase; until then the game simply waits on that person's turn. */
-    override val waitingForSeat: Int get() = -1
+    /**
+     * Per seat: connected / out / removed, and the name. On the host it is worked out from Presence and the
+     * engine; on every other phone it is copied from the roster part of the host's latest state.
+     */
+    var flags by mutableStateOf<List<RosterEntry>>(emptyList())
+        private set
 
-    /** Reconnecting dialogs are a later phase. */
-    override val link: LinkState get() = LinkState.OK
+    private fun flagOf(seat: Int): RosterEntry? = flags.firstOrNull { it.seat == seat }
+
+    /** True when [seat] was knocked out of the tournament. */
+    private fun isSeatOut(seat: Int): Boolean {
+        val g = game ?: return false
+        val p = playerOfSeat.getOrElse(seat) { -1 }
+        return p >= 0 && g.tournament && !g.active[p]
+    }
+
+    /** A seat whose phone dropped and that the game still needs (not knocked out, not removed). */
+    private fun isGone(seat: Int): Boolean {
+        val e = flagOf(seat) ?: return false
+        return !e.connected && !e.removed && !isSeatOut(seat)
+    }
+
+    /**
+     * The seat everybody is waiting for, or -1. A dropped person whose turn it is (or whose tie-break roll
+     * is due) comes first; otherwise the first dropped person. Nothing is shown while this phone's own link is down.
+     */
+    override val waitingForSeat: Int
+        get() {
+            if (!inGame || link != LinkState.OK) return -1
+            val g = game
+            if (g != null) {
+                val blocker = when {
+                    g.overlay == TOverlay.TIEBREAK -> g.tieTurn
+                    g.overlay == TOverlay.NONE && g.phase != Phase.GameOver -> g.activePlayer
+                    else -> -1
+                }
+                if (blocker >= 0) {
+                    val s = seatOfPlayer(blocker)
+                    if (s >= 0 && isGone(s)) return s
+                }
+            }
+            return flags.firstOrNull { isGone(it.seat) }?.seat ?: -1
+        }
+
+    /** How this phone's own connection is doing while a game is on screen (the host's is always shown as OK). */
+    override var link by mutableStateOf(LinkState.OK)
+        private set
+
+    /** What the covering panel says while [link] is not OK: "Reconnecting..." or "Waiting for the host...". */
+    override var linkMessage by mutableStateOf<String?>(null)
+        private set
 
     override val ticketText: String get() = ""
 
@@ -775,8 +941,10 @@ class OnlineSession(
 
     override fun seatOfPlayer(player: Int): Int = playerOfSeat.indexOf(player)
 
+    /** The name of the person in [seat]; a removed person is no longer in the room list, so the roster of the game is the fallback. */
     override fun seatName(seat: Int): String =
-        members.firstOrNull { it.seat == seat && it.role != OnlineRole.WATCHER }?.name ?: ""
+        members.firstOrNull { it.seat == seat && it.role != OnlineRole.WATCHER }?.name
+            ?: flagOf(seat)?.name ?: ""
 
     override fun playerName(player: Int): String {
         val seat = seatOfPlayer(player)
@@ -816,18 +984,49 @@ class OnlineSession(
             return p >= 0 && g.tournament && !g.active[p]
         }
 
-    override fun canRemove(seat: Int): Boolean = false
+    /**
+     * Host only: true when the seat's connection is lost and the game is at a moment where the person can
+     * be taken out (never for a connected person, never for the host, never while a result is showing).
+     */
+    override fun canRemove(seat: Int): Boolean {
+        if (!isHost || !inGame || sessionEnded || finalText != null || seat <= 0) return false
+        val g = game ?: return false
+        val e = flagOf(seat) ?: return false
+        if (e.connected || e.removed) return false
+        val p = playerOfSeat.getOrElse(seat) { -1 }
+        if (p < 0 || g.phase == Phase.GameOver) return false
+        if (g.tournament && !g.active[p]) return false
+        return when (g.overlay) {
+            TOverlay.NONE -> true
+            TOverlay.TIEBREAK -> p in g.tieIds
+            else -> false
+        }
+    }
 
+    /**
+     * Host: takes [seat] out of the game (Remove player). The engine does the rest on the queue, so it never
+     * runs at the same moment as a tap. Only allowed for a seat whose connection is lost.
+     */
     override fun removePlayer(seat: Int) {
-        // Removing a player that dropped is Phase 4.
+        if (!canRemove(seat)) return
+        enqueue(HostIntent(0, K_REMOVE, i = seat))
     }
 
     override fun switchWatchers(on: Boolean) {
         // Online watchers are fixed when the room is created.
     }
 
+    /** The Try again button: opens the 30 seconds of reconnecting again and joins the channels once more. */
     override fun retryReconnect() {
-        // Reconnect dialogs are Phase 4; the socket already reconnects by itself.
+        val r = room ?: return
+        if (isHost || !inGame || finalText != null) return
+        if (link == LinkState.RECONNECTING) return
+        socketLostSince = SystemClock.elapsedRealtime()
+        hostMissingSince = 0L
+        link = LinkState.RECONNECTING
+        linkMessage = MSG_RECONNECTING
+        socket.ensureConnected()
+        guestOpenChannels(r)
     }
 
     /**
@@ -837,7 +1036,7 @@ class OnlineSession(
     override fun canAct(): Boolean {
         val g = game ?: return false
         val me = myPlayer
-        if (me < 0 || watching || finalText != null) return false
+        if (me < 0 || watching || finalText != null || link != LinkState.OK) return false
         return when (g.phase) {
             Phase.AwaitRoll, Phase.Choose, Phase.CaptureChoose -> g.activePlayer == me
             else -> false
@@ -937,13 +1136,16 @@ class OnlineSession(
         val r = room ?: return
         if (finalText != null || sessionEnded) return
         if (r.status == "ended") {
-            if (inGame) showGameOver(if (isHost) MSG_ROOM_CLOSED else MSG_GAME_ENDED)
+            if (inGame) showGameOver(if (isHost) MSG_ROOM_CLOSED else resultText(r.result))
             return
         }
         if (r.status != "playing") return
         if (isHost) {
             if (!inGame && r.gameNo == 0) {
                 hostBeginFirstGame()
+            } else if (!inGame) {
+                // This phone hosts a game that is already running (the app was closed): rebuild it from the save.
+                if (hostResumeFromSave(r) == false) hostRoomLost()
             } else if (inGame) {
                 syncHostMembers()
                 // The record on the server is behind this game (the first call failed): say it again.
@@ -991,21 +1193,183 @@ class OnlineSession(
         sessionEnded = false
         lastWinner = ""
         hostKnown.clear()
+        removedInfo.clear()
+        resultStoredNo = 0
+        presentUids = null
+        lastSeenAt.clear()
+        expectEveryone()
         hostBeginGame()
         inGame = true
         channelsOpen = true
-        socket.open()
-        socket.join(
-            downTopic(r.id),
-            RealtimeChannelListener(
-                onBroadcast = { _, _ -> },   // only the host speaks on "down"
-                // Every time "down" is (re)joined, everybody is told the game again.
-                onJoined = { hostAnnounceGame() }
-            )
-        )
+        openHostChannels(r)
         syncHostMembers()
         startPublisher()
         startGameLoop()
+        persistHost()
+    }
+
+    /** Host: opens the socket and joins "down" (everybody is told the game each time it is joined, and Presence is tracked). */
+    private fun openHostChannels(r: OnlineRoom) {
+        val me = myId() ?: return
+        val down = downTopic(r.id)
+        socket.open()
+        socket.join(
+            down,
+            RealtimeChannelListener(
+                onBroadcast = { _, _ -> },   // only the host speaks on "down"
+                // Every time "down" is (re)joined, everybody is told the game again.
+                onJoined = { hostAnnounceGame() },
+                onPresence = { ready, present -> hostOnPresence(ready, present) }
+            ),
+            presenceKey = me
+        )
+        socket.track(down, presenceMeta())
+    }
+
+    /** What this phone tells everybody in Presence. It only drives indicators; it never grants anything. */
+    private fun presenceMeta(): JSONObject = JSONObject()
+        .put("uid", myId().orEmpty())
+        .put("role", when (myRole) {
+            OnlineRole.HOST -> "host"
+            OnlineRole.WATCHER -> "watcher"
+            else -> "player"
+        })
+        .put("seat", mySeat)
+
+    /** Host: every person in the room counts as "just seen", so nobody is shown as gone before they had time to connect. */
+    private fun expectEveryone() {
+        val now = SystemClock.elapsedRealtime()
+        for (m in members) lastSeenAt[m.userId.lowercase()] = now
+    }
+
+    /** The host's own screen and Presence both end up here: who is connected right now. */
+    private fun hostOnPresence(ready: Boolean, present: Map<String, List<JSONObject>>) {
+        if (!isHost) return
+        if (!ready) {
+            // The host's own connection dropped: nothing is known, so nobody is shown as gone.
+            presentUids = null
+            recomputeFlags()
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        val set = present.keys.map { it.lowercase() }.toSet()
+        for (u in set) lastSeenAt[u] = now
+        presentUids = set
+        recomputeFlags()
+    }
+
+    private fun connectedNow(userId: String?): Boolean {
+        if (userId == null) return false
+        val present = presentUids ?: return true
+        val id = userId.lowercase()
+        if (id in present) return true
+        val seen = lastSeenAt.getOrPut(id) { SystemClock.elapsedRealtime() }
+        return SystemClock.elapsedRealtime() - seen < GONE_GRACE_MS
+    }
+
+    /** Host: works out the per-seat flags (name, connected, out, removed) that everybody is shown. */
+    private fun recomputeFlags() {
+        if (!isHost) return
+        val list = ArrayList<RosterEntry>()
+        for (seat in playerOfSeat.indices) {
+            val m = members.firstOrNull { it.seat == seat && it.role != OnlineRole.WATCHER }
+            val removed = removedInfo.containsKey(seat)
+            val name = m?.name ?: removedInfo[seat] ?: ""
+            val connected = seat == 0 || connectedNow(m?.userId)
+            list.add(RosterEntry(seat, name, "", connected, seat == 0, isSeatOut(seat), removed))
+        }
+        val old = flags
+        var same = old.size == list.size
+        if (same) {
+            for (i in list.indices) {
+                val a = list[i]
+                val b = old[i]
+                if (a.seat != b.seat || a.name != b.name || a.connected != b.connected ||
+                    a.out != b.out || a.removed != b.removed
+                ) {
+                    same = false
+                    break
+                }
+            }
+        }
+        if (!same) flags = list
+    }
+
+    /** The roster part of every state: the per-seat flags as the Offline "lobby" message writes them. */
+    private fun rosterJson(): JSONArray =
+        ConnectProtocol.lobby(playerOfSeat.size, true, flags).optJSONArray("roster") ?: JSONArray()
+
+    /**
+     * Host: rebuilds a running game from the save on this phone. Returns true when the game is up again,
+     * false when it cannot be rebuilt (no save, a different room or person, an older game, a damaged save),
+     * and null when the screen is not up yet (the next snapshot tries again).
+     */
+    private fun hostResumeFromSave(r: OnlineRoom): Boolean? {
+        if (uiScope == null) return null
+        val text = prefs.getString(KEY_HOST_SAVE, null) ?: return false
+        val me = myId() ?: return false
+        try {
+            val o = JSONObject(text)
+            if (!o.optString("userId", "").equals(me, ignoreCase = true)) return false
+            if (!o.optString("roomId", "").equals(r.id, ignoreCase = true)) return false
+            val count = o.getInt("playerCount")
+            if (count != r.playerCount) return false
+            val no = o.getInt("gameNo")
+            // A save that is older than the game the server knows would not match what the guests have.
+            if (no < 1 || no < r.gameNo) return false
+            val orderArr = o.getJSONArray("order")
+            val order = ArrayList<Int>()
+            for (i in 0 until orderArr.length()) order.add(orderArr.getInt(i))
+            if (!validOrder(order, count)) return false
+            val engine = LudoGame(tournament = count >= 3, connectActive = order)
+            if (!engine.restore(o.getString("engine"))) return false
+            engine.visualSink = { e -> onEngineEvent(e) }
+
+            removedInfo.clear()
+            val removedArr = o.optJSONArray("removed")
+            if (removedArr != null) {
+                for (i in 0 until removedArr.length()) {
+                    val x = removedArr.optJSONObject(i) ?: continue
+                    val seat = x.optInt("seat", -1)
+                    if (seat in 1 until count) removedInfo[seat] = x.optString("name", "")
+                }
+            }
+            resetLive()
+            playerOfSeat.clear()
+            playerOfSeat.addAll(order)
+            for (i in seatScores.indices) seatScores[i] = 0
+            for (seat in order.indices) seatScores[seat] = engine.scores.getOrElse(order[seat]) { 0 }
+            game = engine
+            gameNo = no
+            // The guests' counters are far ahead of the last saved one; jumping forward keeps every new state newer.
+            seq = o.optInt("seq", 0) + SEQ_JUMP
+            lastSent = ""
+            lastWinner = o.optString("lastWinner", "")
+            sessionEnded = false
+            resultStoredNo = 0
+            hostKnown.clear()
+            presentUids = null
+            lastSeenAt.clear()
+            expectEveryone()
+            inGame = true
+            channelsOpen = true
+            openHostChannels(r)
+            syncHostMembers()
+            startPublisher()
+            startGameLoop()
+            return true
+        } catch (e: Exception) {
+            stopGame()
+            return false
+        }
+    }
+
+    /** The game this host was running cannot be rebuilt: the room is closed so nobody waits for it for ever. */
+    private fun hostRoomLost() {
+        val r = room ?: return
+        clearHostSave()
+        scope.launch { call("ludo_end_room", JSONObject().put("p_room", r.id)) }
+        closeRoom(MSG_RESUME_FAILED)
     }
 
     /** Creates a fresh game with a new random assignment and the carried-over scores, and tells everybody. */
@@ -1030,6 +1394,7 @@ class OnlineSession(
         val old = game ?: return
         for (seat in playerOfSeat.indices) seatScores[seat] = old.scores.getOrElse(playerOfSeat[seat]) { 0 }
         hostBeginGame()
+        persistHost()
     }
 
     /** The "start" message of the current game: player count, game number, and who plays which colours. */
@@ -1081,6 +1446,7 @@ class OnlineSession(
         val present = members.map { it.userId.lowercase() }.filter { it != me }.toSet()
         for (uid in present) {
             if (!hostKnown.add(uid)) continue
+            lastSeenAt.getOrPut(uid) { SystemClock.elapsedRealtime() }
             socket.join(
                 upTopic(r.id, uid),
                 RealtimeChannelListener(onBroadcast = { event, body -> hostOnUp(uid, event, body) })
@@ -1110,6 +1476,7 @@ class OnlineSession(
             while (g == generation && isHost) {
                 delay(ONLINE_STATE_INTERVAL_MS)
                 publish(force = false)
+                maybeSave()
             }
         }
     }
@@ -1125,13 +1492,52 @@ class OnlineSession(
         if (g.phase == Phase.GameOver) {
             for (seat in playerOfSeat.indices) seatScores[seat] = g.scores.getOrElse(playerOfSeat[seat]) { 0 }
             if (g.winner >= 0) lastWinner = playerName(g.winner)
+            storeResultOnce()
         }
+        // Who is connected, out or removed travels with every state, so every phone can show it.
+        recomputeFlags()
+        val roster = rosterJson()
         val snapshot = g.toMirrorJson()
-        val text = snapshot.toString()
+        val text = snapshot.toString() + roster.toString()
         if (!force && text == lastSent) return
         lastSent = text
+        saveDirty = true
         seq++
-        socket.send(downTopic(r.id), ConnectProtocol.T_STATE, ConnectProtocol.state(seq, gameNo, snapshot))
+        socket.send(
+            downTopic(r.id), ConnectProtocol.T_STATE,
+            ConnectProtocol.state(seq, gameNo, snapshot).put("roster", roster)
+        )
+    }
+
+    /** The JSON the server keeps about a finished game (or the whole session): winner and scores in seat order. */
+    private fun resultJson(winner: String, no: Int): JSONObject {
+        val scores = JSONArray()
+        for (seat in playerOfSeat.indices) {
+            scores.put(JSONObject().put("name", seatName(seat)).put("score", scoreOfSeat(seat)))
+        }
+        return JSONObject().put("winnerName", winner).put("scores", scores).put("gameNo", no)
+    }
+
+    /**
+     * Host: once per finished game, stores its result on the server (so a person who comes back later still
+     * sees the winner even if this phone is off). A failed call is tried again after a few seconds.
+     */
+    private fun storeResultOnce() {
+        val g = game ?: return
+        val r = room ?: return
+        if (g.phase != Phase.GameOver || g.winner < 0 || resultStoredNo == gameNo) return
+        val now = SystemClock.elapsedRealtime()
+        if (resultAttemptAt != 0L && now - resultAttemptAt < RESULT_RETRY_MS) return
+        resultAttemptAt = now
+        val no = gameNo
+        val gen = generation
+        val payload = resultJson(lastWinner, no)
+        scope.launch {
+            val reply = call("ludo_set_result", JSONObject().put("p_room", r.id).put("p_result", payload))
+            if (gen != generation) return@launch
+            val j = reply.json ?: return@launch
+            if (j.optBoolean("ok", false) || j.optString("reason", "") == "ended") resultStoredNo = no
+        }
     }
 
     /** Host: sends one person the game (start, then the whole state) on their own "to" channel. */
@@ -1142,7 +1548,11 @@ class OnlineSession(
         val to = toTopic(r.id, userId)
         socket.send(to, ConnectProtocol.T_START, startMessage())
         seq++
-        socket.send(to, ConnectProtocol.T_STATE, ConnectProtocol.state(seq, gameNo, g.toMirrorJson()))
+        recomputeFlags()
+        socket.send(
+            to, ConnectProtocol.T_STATE,
+            ConnectProtocol.state(seq, gameNo, g.toMirrorJson()).put("roster", rosterJson())
+        )
     }
 
     private fun memberOf(userId: String): OnlineMember? =
@@ -1168,6 +1578,7 @@ class OnlineSession(
     private fun hostIntent(member: OnlineMember, msg: JSONObject) {
         val seat = member.seat ?: return
         if (member.role == OnlineRole.WATCHER) return
+        if (removedInfo.containsKey(seat)) return
         val intent = when (msg.optString("kind", "")) {
             ConnectProtocol.K_ROLL -> HostIntent(seat, ConnectProtocol.K_ROLL)
             ConnectProtocol.K_TIE_ROLL -> HostIntent(seat, ConnectProtocol.K_TIE_ROLL)
@@ -1273,8 +1684,49 @@ class OnlineSession(
             ConnectProtocol.K_NEXT_ROUND ->
                 if (req.seat == 0 && g.overlay == TOverlay.RESULT) g.resultNext()
             ConnectProtocol.K_NEXT_GAME ->
-                if (req.seat == 0 && g.phase == Phase.GameOver) newGameFromHost()
+                // A game with a removed person cannot go on: the host ends it instead.
+                if (req.seat == 0 && g.phase == Phase.GameOver && !hasRemoved) newGameFromHost()
+            K_REMOVE ->
+                if (req.seat == 0 && canRemove(req.i)) {
+                    val victim = playerOfSeat.getOrElse(req.i) { -1 }
+                    if (victim >= 0) {
+                        g.connectRemove(victim)
+                        // Flag the seat only if the engine really took the person out (the game may have moved on meanwhile).
+                        val done = g.phase == Phase.GameOver || (g.tournament && !g.active[victim])
+                        if (done) markRemoved(req.i)
+                    }
+                }
             else -> Unit
+        }
+    }
+
+    /**
+     * Host: the person in [seat] is out of the game for good. They are told on their own channel (if they ever
+     * come back they see why), the server is told so they cannot return, and the roster flag goes out with the next state.
+     */
+    private fun markRemoved(seat: Int) {
+        val r = room ?: return
+        val m = members.firstOrNull { it.seat == seat && it.role != OnlineRole.WATCHER } ?: return
+        removedInfo[seat] = m.name
+        socket.send(toTopic(r.id, m.userId), ConnectProtocol.T_REMOVED, ConnectProtocol.removed())
+        removeOnServer(r.id, m.userId)
+        recomputeFlags()
+        saveDirty = true
+    }
+
+    /** Tells the server to remove [userId]; a failed call is tried again by the 3-second loop. */
+    private fun removeOnServer(roomId: String, userId: String) {
+        scope.launch {
+            call("ludo_remove_member", JSONObject().put("p_room", roomId).put("p_user", userId))
+        }
+    }
+
+    /** Host: the server still lists somebody who was removed here (the first call failed): ask again. */
+    private fun retryRemovals() {
+        val r = room ?: return
+        for (seat in removedInfo.keys.toList()) {
+            val m = members.firstOrNull { it.seat == seat && it.role != OnlineRole.WATCHER } ?: continue
+            removeOnServer(r.id, m.userId)
         }
     }
 
@@ -1349,6 +1801,7 @@ class OnlineSession(
         val seats = (0 until playerOfSeat.size).toList()
         val names = seats.map { seatName(it) }
         val scores = seats.map { scoreOfSeat(it) }
+        val result = resultJson(lastWinner, gameNo)
         sessionEnded = true
         queue.clear()
         runnerJob?.cancel()
@@ -1360,7 +1813,18 @@ class OnlineSession(
         gameLoopJob?.cancel()
         gameLoopJob = null
         finalText = endedText(lastWinner, names, scores)
-        scope.launch { call("ludo_end_room", JSONObject().put("p_room", r.id)) }
+        clearHostSave()
+        // The room is closed on the server with the result, so people who come back later see the winner.
+        // A failed call is tried a few more times.
+        scope.launch {
+            var tries = 0
+            while (tries < END_ROOM_TRIES) {
+                val reply = call("ludo_end_room", JSONObject().put("p_room", r.id).put("p_result", result))
+                if (reply.json != null) break
+                tries++
+                delay(END_ROOM_RETRY_MS)
+            }
+        }
     }
 
     /** The "Game ended" panel text: the winner of the last finished game (if any) and the scores. */
@@ -1411,8 +1875,14 @@ class OnlineSession(
         socket.open()
         socket.join(
             down,
-            RealtimeChannelListener(onBroadcast = { event, body -> guestOnMessage(event, body) }, onJoined = ready)
+            RealtimeChannelListener(
+                onBroadcast = { event, body -> guestOnMessage(event, body) },
+                onJoined = ready,
+                onPresence = { isReady, present -> guestOnPresence(isReady, present, r.hostId) }
+            ),
+            presenceKey = me
         )
+        socket.track(down, presenceMeta())
         socket.join(
             to,
             RealtimeChannelListener(onBroadcast = { event, body -> guestOnMessage(event, body) }, onJoined = ready)
@@ -1450,9 +1920,17 @@ class OnlineSession(
                 ConnectProtocol.T_STATE -> guestState(body)
                 ConnectProtocol.T_EV -> guestEvent(body)
                 ConnectProtocol.T_ENDED -> {
+                    if (finalText != null) return
+                    val (names, scores) = ConnectProtocol.endedScoresFromJson(body.optJSONArray("scores"))
                     freezeGame()
                     myRoomRef = null
-                    finalText = MSG_GAME_ENDED
+                    finalText = endedText(body.optString("winnerName", ""), names, scores)
+                }
+                ConnectProtocol.T_REMOVED -> {
+                    if (finalText != null) return
+                    freezeGame()
+                    myRoomRef = null
+                    finalText = MSG_REMOVED
                 }
                 else -> Unit
             }
@@ -1479,6 +1957,11 @@ class OnlineSession(
         val s = msg.optInt("seq", -1)
         if (s <= lastSeq || msg.optInt("gameNo", -1) != gameNo) return
         val snapshot = msg.optJSONObject("game") ?: return
+        // Who is connected, out or removed: shown at once, even if the board waits for an animation.
+        msg.optJSONArray("roster")?.let { arr ->
+            val list = ConnectProtocol.rosterFromJson(arr).sortedBy { it.seat }
+            if (list.isNotEmpty()) flags = list
+        }
         val head = anims.firstOrNull()
         if (head != null && s >= head.seq) {
             // An animation that comes before this snapshot has still to play: keep only the newest one for later.
@@ -1674,6 +2157,7 @@ class OnlineSession(
      */
     private fun startGameLoop() {
         gameLoopJob?.cancel()
+        if (!isHost) startLinkWatch()
         val g = generation
         gameLoopJob = scope.launch {
             var sinceTouch = 0L
@@ -1705,14 +2189,88 @@ class OnlineSession(
         if (!inGame || room?.id != current.id || finalText != null) return
         if (j.optBoolean("ok", false)) {
             applySnapshot(j)
+            if (isHost && inGame) retryRemovals()
         } else {
             when (j.optString("reason", "")) {
                 "not_member" -> showGameOver("You are no longer in that room.")
-                "expired" -> showGameOver(reasonText("expired"))
+                "removed" -> showGameOver(MSG_REMOVED)
+                "expired" -> showGameOver(resultText(parseResult(j.optJSONObject("result"))))
                 "not_found" -> showGameOver(reasonText("ended"))
                 else -> Unit
             }
         }
+    }
+
+    // ----- Guests and watchers: Presence and the state of this phone's own connection -----
+
+    /** What Presence says about the host: [ready] false means it is not known (this phone's connection is down). */
+    private fun guestOnPresence(ready: Boolean, present: Map<String, List<JSONObject>>, hostId: String) {
+        if (isHost) return
+        hostPresenceReady = ready
+        hostPresent = ready && present.keys.any { it.equals(hostId, ignoreCase = true) }
+        if (link != LinkState.OK) evaluateLink()
+    }
+
+    /** Looks at the connection once a second while a game is on screen (guests and watchers only). */
+    private fun startLinkWatch() {
+        linkJob?.cancel()
+        val g = generation
+        linkJob = scope.launch {
+            while (g == generation) {
+                delay(LINK_STEP_MS)
+                if (g != generation) return@launch
+                if (foreground) evaluateLink()
+            }
+        }
+    }
+
+    private fun setLink(state: LinkState, message: String?) {
+        val before = link
+        if (before != state) link = state
+        if (linkMessage != message) linkMessage = message
+        // Back to normal: ask the host for the game again, in case something was missed meanwhile.
+        if (before != LinkState.OK && state == LinkState.OK) requestState()
+    }
+
+    /**
+     * The decision behind the covering panels:
+     *  - this phone's connection (socket or its channels) is down: "Reconnecting..." after 2 seconds, then
+     *    after 30 seconds Try again / Exit;
+     *  - the connection is fine but the host is not on the channel: "Waiting for the host..." (no time limit;
+     *    the person can Exit at any time and use Return to room later);
+     *  - otherwise nothing.
+     */
+    private fun evaluateLink() {
+        val r = room
+        val me = myId()
+        if (isHost || !inGame || finalText != null || r == null || me == null) {
+            setLink(LinkState.OK, null)
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        val connected = socket.state == RealtimeState.CONNECTED &&
+            socket.isJoined(downTopic(r.id)) && socket.isJoined(toTopic(r.id, me)) && socket.isJoined(upTopic(r.id, me))
+        if (!connected) {
+            if (socketLostSince == 0L) socketLostSince = now
+            val lostFor = now - socketLostSince
+            if (lostFor >= LINK_FAIL_MS) {
+                setLink(LinkState.FAILED, MSG_RECONNECT_FAILED)
+            } else if (lostFor >= LINK_GRACE_MS && link != LinkState.FAILED) {
+                setLink(LinkState.RECONNECTING, MSG_RECONNECTING)
+            }
+            return
+        }
+        socketLostSince = 0L
+        if (hostPresenceReady && !hostPresent) {
+            if (hostMissingSince == 0L) hostMissingSince = now
+            if (now - hostMissingSince >= HOST_GRACE_MS) {
+                setLink(LinkState.RECONNECTING, MSG_WAITING_HOST)
+                return
+            }
+        } else {
+            hostMissingSince = 0L
+        }
+        setLink(LinkState.OK, null)
     }
 
     // ----- Ending and leaving -----
@@ -1725,6 +2283,8 @@ class OnlineSession(
         gameLoopJob = null
         resyncJob?.cancel()
         resyncJob = null
+        linkJob?.cancel()
+        linkJob = null
         socket.close()
     }
 
@@ -1754,6 +2314,19 @@ class OnlineSession(
         sessionEnded = false
         lastWinner = ""
         for (i in seatScores.indices) seatScores[i] = 0
+        removedInfo.clear()
+        presentUids = null
+        lastSeenAt.clear()
+        resultStoredNo = 0
+        resultAttemptAt = 0L
+        saveDirty = false
+        socketLostSince = 0L
+        hostMissingSince = 0L
+        hostPresenceReady = false
+        hostPresent = false
+        flags = emptyList()
+        link = LinkState.OK
+        linkMessage = null
         game = null
         inGame = false
         gameNo = 0
@@ -1769,6 +2342,11 @@ class OnlineSession(
         val r = room
         val wasWatcher = myRole == OnlineRole.WATCHER
         val closed = finalText != null
+        if (isHost && inGame) {
+            // A game that is still running is only paused (it can be resumed); a finished or ended one is let go.
+            val over = game?.phase == Phase.GameOver
+            if (closed || sessionEnded || over) clearHostSave() else persistHost()
+        }
         stopPolling()
         clearLocal()
         if (closed) myRoomRef = null
@@ -1776,6 +2354,90 @@ class OnlineSession(
             scope.launch { call("ludo_leave_room", JSONObject().put("p_room", r.id)) }
         }
     }
+
+    // ----- The saved hosted game (Resume hosted game) -----
+
+    private fun readHostSaveInfo(): OnlineHostSave? {
+        val text = prefs.getString(KEY_HOST_SAVE, null) ?: return null
+        return try {
+            val o = JSONObject(text)
+            val count = o.getInt("playerCount")
+            if (count !in 2..4) return null
+            OnlineHostSave(o.getString("userId"), o.getString("roomId"), o.optString("code", ""), count)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun clearHostSave() {
+        prefs.edit().remove(KEY_HOST_SAVE).apply()
+        hostSave = null
+        saveDirty = false
+    }
+
+    /** Saves the running game now if it changed; at most about every two seconds. */
+    private fun maybeSave() {
+        if (!isHost || !inGame || sessionEnded || game == null) return
+        if (!saveDirty || SystemClock.elapsedRealtime() - lastSaveAt < SAVE_INTERVAL_MS) return
+        persistHost()
+    }
+
+    /**
+     * Writes everything needed to resume the hosted game: the room, the colours of each seat, the game number,
+     * the people who were removed and the engine itself. People who are in the room are not saved: the server
+     * knows them, and they re-attach by user id.
+     */
+    private fun persistHost() {
+        val g = game ?: return
+        val r = room ?: return
+        val me = myId() ?: return
+        if (!isHost || !inGame || sessionEnded || finalText != null || playerOfSeat.isEmpty()) return
+        try {
+            val o = JSONObject()
+                .put("userId", me)
+                .put("roomId", r.id)
+                .put("code", r.code)
+                .put("playerCount", r.playerCount)
+                .put("maxWatchers", r.maxWatchers)
+                .put("gameNo", gameNo)
+                .put("seq", seq)
+                .put("lastWinner", lastWinner)
+                .put("order", JSONArray().also { a -> playerOfSeat.forEach { a.put(it) } })
+                .put("removed", JSONArray().also { a ->
+                    for ((seat, name) in removedInfo) a.put(JSONObject().put("seat", seat).put("name", name))
+                })
+                .put("engine", g.toSaveString())
+                .put("time", System.currentTimeMillis())
+            prefs.edit().putString(KEY_HOST_SAVE, o.toString()).apply()
+            hostSave = OnlineHostSave(me, r.id, r.code, r.playerCount)
+            saveDirty = false
+            lastSaveAt = SystemClock.elapsedRealtime()
+        } catch (e: Exception) {
+            // A failed save only costs the Resume button.
+        }
+    }
+
+    // ----- Results -----
+
+    /** Reads the result the server stores ({winnerName, scores: [{name, score}], gameNo}); null when there is none. */
+    private fun parseResult(o: JSONObject?): OnlineResult? {
+        if (o == null) return null
+        val names = ArrayList<String>()
+        val scores = ArrayList<Int>()
+        val arr = o.optJSONArray("scores")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val x = arr.optJSONObject(i) ?: continue
+                names.add(x.optString("name", "Player"))
+                scores.add(x.optInt("score", 0))
+            }
+        }
+        return OnlineResult(o.optString("winnerName", ""), names, scores, o.optInt("gameNo", 0))
+    }
+
+    /** The "Game ended" text for a stored result; plain "Game ended." when the host never stored one. */
+    private fun resultText(result: OnlineResult?): String =
+        if (result == null) "Game ended." else endedText(result.winnerName, result.names, result.scores)
 
     private fun colorWord(c: LudoColor): String = when (c) {
         LudoColor.RED -> "Red"
@@ -1791,6 +2453,32 @@ class OnlineSession(
         const val MSG_NO_NET = "Online needs an internet connection."
         const val MSG_ROOM_CLOSED = "The host closed the room."
         const val MSG_GAME_ENDED = "The host ended the game."
+        const val MSG_REMOVED = "You were removed by the host."
+        const val MSG_RECONNECTING = "Reconnecting..."
+        const val MSG_RECONNECT_FAILED = "Couldn't reconnect yet."
+        const val MSG_WAITING_HOST = "Waiting for the host..."
+        const val MSG_HOST_GAME_OVER = "That game has already ended."
+        const val MSG_RESUME_FAILED = "That game could not be resumed, so the room was closed."
+
+        /** Host-only work item: take a person out of the game (never sent over the air). */
+        const val K_REMOVE = "remove"
+
+        const val KEY_HOST_SAVE = "online_host_save"
+        const val SAVE_INTERVAL_MS = 2_000L
+
+        /** A person absent from Presence for this long counts as disconnected (it spares the first seconds of a join). */
+        const val GONE_GRACE_MS = 8_000L
+
+        /** After a resume the sequence number of the states jumps this far ahead of the last saved one. */
+        const val SEQ_JUMP = 1_000
+        const val RESULT_RETRY_MS = 5_000L
+        const val END_ROOM_TRIES = 4
+        const val END_ROOM_RETRY_MS = 2_000L
+
+        const val LINK_STEP_MS = 1_000L
+        const val LINK_GRACE_MS = 2_000L
+        const val LINK_FAIL_MS = 30_000L
+        const val HOST_GRACE_MS = 6_000L
 
         /** Tournament-style engine players 0..3 = red, green, yellow, blue. */
         val TOURNAMENT_COLORS = listOf(LudoColor.RED, LudoColor.GREEN, LudoColor.YELLOW, LudoColor.BLUE)

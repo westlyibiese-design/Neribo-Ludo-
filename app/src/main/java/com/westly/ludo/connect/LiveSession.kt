@@ -130,4 +130,10 @@ interface LiveSession {
 
     /** False online: watchers are chosen when the room is created and cannot be switched later. */
     val canToggleWatchers: Boolean get() = true
+
+    /**
+     * Online: what the covering panel says while [link] is not OK, for example "Reconnecting..." (this phone
+     * lost its connection) or "Waiting for the host..." (the host's phone is gone). Null = the screen's own text.
+     */
+    val linkMessage: String? get() = null
 }

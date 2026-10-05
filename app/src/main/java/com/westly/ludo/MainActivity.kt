@@ -215,6 +215,7 @@ class MainActivity : ComponentActivity() {
         saveGame()
         // A hosted game is saved so it can be resumed if the app is closed.
         connect.saveHostNow()
+        onlineSession.saveHostNow()
     }
 
     override fun onDestroy() {
@@ -1088,12 +1089,13 @@ fun LudoScreen(
         // This phone's own link to the host is down (or the host is gone): the game waits.
         if (cs.finalText == null && cs.link == LinkState.RECONNECTING) {
             ConnectDialog(
-                "Reconnecting...\nWaiting for the host...",
+                // Online says which of the two it is; Offline keeps its own wording.
+                cs.linkMessage ?: "Reconnecting...\nWaiting for the host...",
                 "Leave", onPrimary = { dialog = "connectLeave" }
             )
         } else if (cs.finalText == null && cs.link == LinkState.FAILED) {
             ConnectDialog(
-                "Couldn't reach the host yet.",
+                cs.linkMessage ?: "Couldn't reach the host yet.",
                 "Try again", onPrimary = { cs.retryReconnect() },
                 secondaryLabel = "Leave", onSecondary = { dialog = "connectLeave" }
             )

@@ -158,6 +158,7 @@ fun OnlineScreen(
 ) {
     LaunchedEffect(Unit) { session.checkMyRoom() }
     val enabled = !session.busy
+    Box(Modifier.fillMaxSize()) {
     OnlineFrame("Online", 52f, onBack) { u ->
         Spacer(Modifier.height(u * 6f))
         Column(Modifier.width(u * 84f)) {
@@ -172,7 +173,17 @@ fun OnlineScreen(
         }
         Spacer(Modifier.height(u * 5f))
         val ref = session.myRoomRef
-        if (ref != null) {
+        val resume = session.resumeOffer
+        if (resume != null) {
+            // This phone hosted a game that is still running: rebuild it from the saved one.
+            GlossButton(
+                "Resume hosted game", Palette.Orange, u * 78f, u * 18f,
+                subtitle = "Room ${resume.code}",
+                dimmed = !enabled,
+                onClick = if (enabled) ({ session.resumeHosted { ok -> if (ok) onReturn() } }) else null
+            )
+            Spacer(Modifier.height(u * 4f))
+        } else if (ref != null) {
             val goBack: () -> Unit = {
                 session.openRoom(ref.roomId) { ok -> if (ok) onReturn() }
             }
@@ -194,6 +205,16 @@ fun OnlineScreen(
             dimmed = !enabled, onClick = if (enabled) onJoin else null
         )
     }
+    OnlineEndedDialog(session)
+    }
+}
+
+/** "Game ended" with the winner and scores the server stored, shown to somebody who came back to a closed room. */
+@Composable
+private fun OnlineEndedDialog(session: OnlineSession) {
+    val text = session.endedPanel ?: return
+    BackHandler(true) { session.dismissEnded() }
+    ConnectDialog(message = text, primaryLabel = "OK", onPrimary = { session.dismissEnded() })
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +402,7 @@ fun OnlineJoinScreen(session: OnlineSession, playerName: String, onBack: () -> U
                 onSecondary = { session.dismissOfferWatch() }
             )
         }
+        OnlineEndedDialog(session)
         OnlineConflictDialog(session, onRoom)
     }
 }
