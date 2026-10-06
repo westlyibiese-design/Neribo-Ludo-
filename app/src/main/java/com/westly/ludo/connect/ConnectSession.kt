@@ -505,7 +505,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
                     state = ConnectState.HOST_LOBBY
                 } else {
                     teardown()
-                    error = MSG_HOST_FAILED
+                    error = withReason(MSG_HOST_FAILED, problem)
                 }
             }
         }
@@ -530,7 +530,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         helloRole = if (watcher) ConnectProtocol.ROLE_WATCHER else ConnectProtocol.ROLE_PLAYER
         state = ConnectState.SEARCHING
         manager.startDiscovery { problem ->
-            if (g == generation && problem != null) failJoin(MSG_SEARCH_FAILED)
+            if (g == generation && problem != null) failJoin(withReason(MSG_SEARCH_FAILED, problem))
         }
         guestTimer = scope.launch {
             delay(DISCOVERY_TIMEOUT_MS)
@@ -720,7 +720,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
                         publish(force = true)
                     } else {
                         teardown()
-                        error = MSG_HOST_FAILED
+                        error = withReason(MSG_HOST_FAILED, problem)
                     }
                 }
             }
@@ -2055,9 +2055,13 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         private val TOURNAMENT_COLORS = listOf(LudoColor.RED, LudoColor.GREEN, LudoColor.YELLOW, LudoColor.BLUE)
 
         private const val MSG_HOST_FAILED =
-            "Couldn't open the lobby. Check that Bluetooth and Wi-Fi are on, then try again."
+            "Couldn't open the lobby. Check that Bluetooth, Wi-Fi and Location are on, then try again."
         private const val MSG_SEARCH_FAILED =
-            "Couldn't look for nearby phones. Check that Bluetooth and Wi-Fi are on, then try again."
+            "Couldn't look for nearby phones. Check that Bluetooth, Wi-Fi and Location are on, then try again."
+
+        /** Adds the technical reason (for example "8007 STATUS_RADIO_ERROR") in brackets under a friendly message. */
+        private fun withReason(message: String, reason: String?): String =
+            if (reason.isNullOrBlank()) message else "$message\n($reason)"
         private const val MSG_NOT_FOUND =
             "Couldn't find the host. Stand closer to the host phone and try again."
         private const val MSG_CONNECT_FAILED =

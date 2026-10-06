@@ -103,7 +103,7 @@ class SupabaseApi(private val auth: OnlineAuth) {
         return try {
             OnlineHttp.call(request)
         } catch (e: IOException) {
-            throw OnlineException(OnlineException.Kind.NO_NETWORK, "Online needs an internet connection.")
+            throw OnlineException(OnlineException.Kind.NO_NETWORK, "Couldn't reach the server. Your internet may be off or slow - please try again.")
         }
     }
 

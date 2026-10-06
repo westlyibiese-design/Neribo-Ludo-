@@ -1,5 +1,6 @@
 package com.westly.ludo.online
 
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -55,7 +56,8 @@ class RealtimeChannelListener(
  *  - [track] / [untrack] and [RealtimeChannelListener.onPresence] give Phoenix Presence on a channel that
  *    was joined with a presence key: who is connected, learned from the server's presence_state and
  *    presence_diff frames. A dropped socket makes the list "not ready" until the next join.
- *  - A heartbeat goes out every 25 s; two unanswered heartbeats mean the socket is dead.
+ *  - A heartbeat goes out every 5 s (the answer's delay is the connection's round trip, see [roundTripMs]);
+ *    while one is unanswered no new one is sent, and 6 unanswered ticks (about 30 s) mean the socket is dead.
  *  - The access token is checked every 30 s and sent to every joined channel when it changed, so a
  *    long game keeps working after the one-hour token was renewed.
  *
@@ -70,6 +72,14 @@ class RealtimeSocket(private val tokenProvider: suspend () -> String?) {
     /** CONNECTED / CONNECTING / DISCONNECTED, as Compose state. */
     var state by mutableStateOf(RealtimeState.DISCONNECTED)
         private set
+
+    /** How long the server took to answer the last heartbeat, in milliseconds (0 = not measured yet). */
+    var roundTripMs by mutableStateOf(0L)
+        private set
+
+    /** How long the heartbeat that is still unanswered has been waiting (0 = none waiting). A growing number means a slow link. */
+    fun pendingHeartbeatMs(): Long =
+        if (heartbeatRef != null && state == RealtimeState.CONNECTED) SystemClock.elapsedRealtime() - heartbeatSentAt else 0L
 
     private class Channel(val name: String, val listener: RealtimeChannelListener, val presenceKey: String?) {
         var joined = false
@@ -96,6 +106,7 @@ class RealtimeSocket(private val tokenProvider: suspend () -> String?) {
     private var tokenJob: Job? = null
     private var reconnectJob: Job? = null
     private var heartbeatRef: String? = null
+    private var heartbeatSentAt = 0L
     private var missedHeartbeats = 0
     private var lastToken: String? = null
 
@@ -166,6 +177,7 @@ class RealtimeSocket(private val tokenProvider: suspend () -> String?) {
         val forGeneration = generation
         val ref = nextRef()
         heartbeatRef = ref
+        heartbeatSentAt = SystemClock.elapsedRealtime()
         socket.send(frame("phoenix", "heartbeat", JSONObject(), ref, null))
         scope.launch {
             delay(PROBE_MS)
@@ -282,6 +294,7 @@ class RealtimeSocket(private val tokenProvider: suspend () -> String?) {
         backoffMs = FIRST_BACKOFF_MS
         missedHeartbeats = 0
         heartbeatRef = null
+        roundTripMs = 0L
         startHeartbeat(forGeneration)
         startTokenWatch(forGeneration)
         for (channel in channels.values.toList()) sendJoin(channel)
@@ -330,14 +343,17 @@ class RealtimeSocket(private val tokenProvider: suspend () -> String?) {
                 delay(HEARTBEAT_MS)
                 if (forGeneration != generation) return@launch
                 if (heartbeatRef != null) {
+                    // The last one is still unanswered: keep waiting for it (its delay is what slowLink measures).
                     missedHeartbeats++
                     if (missedHeartbeats >= MAX_MISSED_HEARTBEATS) {
                         handleDrop(forGeneration)
                         return@launch
                     }
+                    continue
                 }
                 val ref = nextRef()
                 heartbeatRef = ref
+                heartbeatSentAt = SystemClock.elapsedRealtime()
                 ws?.send(frame("phoenix", "heartbeat", JSONObject(), ref, null))
             }
         }
@@ -477,6 +493,7 @@ class RealtimeSocket(private val tokenProvider: suspend () -> String?) {
         val event = msg.optString("event", "")
         if (topic == "phoenix") {
             if (event == "phx_reply" && heartbeatRef != null && msg.optString("ref", "") == heartbeatRef) {
+                roundTripMs = SystemClock.elapsedRealtime() - heartbeatSentAt
                 heartbeatRef = null
                 missedHeartbeats = 0
             }
@@ -585,9 +602,9 @@ class RealtimeSocket(private val tokenProvider: suspend () -> String?) {
     private companion object {
         const val WIRE_PREFIX = "realtime:"
         const val NORMAL_CLOSE = 1000
-        const val HEARTBEAT_MS = 25_000L
+        const val HEARTBEAT_MS = 5_000L
         const val PROBE_MS = 5_000L
-        const val MAX_MISSED_HEARTBEATS = 2
+        const val MAX_MISSED_HEARTBEATS = 6
         const val TOKEN_CHECK_MS = 30_000L
         const val FIRST_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 10_000L

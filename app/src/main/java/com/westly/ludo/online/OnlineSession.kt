@@ -142,6 +142,10 @@ class OnlineSession(
         private set
 
     var roomLink by mutableStateOf(OnlineLink.OK)
+
+    /** True while the room screen's last answer from the server was slow (so the person knows the app is not frozen). */
+    var roomSlow by mutableStateOf(false)
+        private set
         private set
 
     /** The live room the server reports for this person; drives the "Return to room" button. */
@@ -479,7 +483,15 @@ class OnlineSession(
 
     private suspend fun pollOnce() {
         val current = room ?: return
+        val startedAt = SystemClock.elapsedRealtime()
+        // If the answer takes long, say so while we wait (not only afterwards).
+        val slowWatch = scope.launch {
+            delay(POLL_SLOW_MS)
+            roomSlow = true
+        }
         val reply = call("ludo_room_snapshot", JSONObject().put("p_room", current.id))
+        slowWatch.cancel()
+        roomSlow = SystemClock.elapsedRealtime() - startedAt >= POLL_SLOW_MS
         val j = reply.json
         if (j == null) {
             // Only a real network problem shows the banner; other errors are simply tried again.
@@ -931,6 +943,22 @@ class OnlineSession(
     override var linkMessage by mutableStateOf<String?>(null)
         private set
 
+    /**
+     * A small note over the board that does not cover the game: "Slow connection..." while this phone's
+     * link is slow, or a short notice that a tap did not go through. Null = nothing to say.
+     */
+    override var liveNote by mutableStateOf<String?>(null)
+        private set
+
+    private var flashText: String? = null
+    private var flashUntil = 0L
+    private var slowLink = false
+    private var noteJob: Job? = null
+
+    /** When the last tap left this phone and which state number was on screen then (0 = no tap is waiting for its answer). */
+    private var tapSentAt = 0L
+    private var tapSeq = 0
+
     override val ticketText: String get() = ""
 
     override val isOnline: Boolean get() = true
@@ -1105,7 +1133,66 @@ class OnlineSession(
 
     /** Host and guest taps go through this one route: the host's own are queued, everybody else's are sent. */
     private fun act(intent: HostIntent, message: JSONObject) {
-        if (isHost) enqueue(intent) else sendUp(message)
+        if (isHost) {
+            enqueue(intent)
+            return
+        }
+        if (sendUp(message)) {
+            // The host's answer is the next state; the note watch complains if it is very late.
+            tapSentAt = SystemClock.elapsedRealtime()
+            tapSeq = lastSeq
+        } else {
+            // The tap could not even leave this phone (the connection is down or too slow): say so, never stay silent.
+            flash(MSG_TAP_LOST)
+            requestState()
+        }
+    }
+
+    /** Shows [text] over the board for a few seconds. */
+    private fun flash(text: String) {
+        flashText = text
+        flashUntil = SystemClock.elapsedRealtime() + NOTE_FLASH_MS
+        updateNote()
+    }
+
+    /** Works out what the small note over the board says right now. */
+    private fun updateNote() {
+        val now = SystemClock.elapsedRealtime()
+        val text = when {
+            flashText != null && now < flashUntil -> flashText
+            slowLink -> if (isHost) MSG_SLOW_HOST else MSG_SLOW
+            else -> null
+        }
+        if (liveNote != text) liveNote = text
+    }
+
+    /** Once a second while a game is on screen: is this phone's connection slow, and did the last tap get its answer? */
+    private fun startNoteWatch() {
+        noteJob?.cancel()
+        val g = generation
+        noteJob = scope.launch {
+            while (g == generation) {
+                delay(NOTE_STEP_MS)
+                if (g != generation) return@launch
+                if (foreground) checkNote()
+            }
+        }
+    }
+
+    private fun checkNote() {
+        val now = SystemClock.elapsedRealtime()
+        if (tapSentAt != 0L) {
+            if (lastSeq > tapSeq) {
+                tapSentAt = 0L
+            } else if (now - tapSentAt >= TAP_WAIT_MS) {
+                tapSentAt = 0L
+                flash(MSG_TAP_SLOW)
+                requestState()
+            }
+        }
+        slowLink = socket.state == RealtimeState.CONNECTED &&
+            (socket.roundTripMs >= SLOW_RTT_MS || socket.pendingHeartbeatMs() >= SLOW_PENDING_MS)
+        updateNote()
     }
 
     // ----- Topics -----
@@ -1119,10 +1206,10 @@ class OnlineSession(
     private fun myId(): String? = auth.user?.id?.lowercase()
 
     /** Sends [message] to the host on this person's own "up" channel; the message type is the event name. */
-    private fun sendUp(message: JSONObject) {
-        val r = room ?: return
-        val me = myId() ?: return
-        socket.send(upTopic(r.id, me), message.optString("t", ""), message)
+    private fun sendUp(message: JSONObject): Boolean {
+        val r = room ?: return false
+        val me = myId() ?: return false
+        return socket.send(upTopic(r.id, me), message.optString("t", ""), message)
     }
 
     // ----- Starting a game, on whichever phone notices that the room is playing -----
@@ -2158,6 +2245,7 @@ class OnlineSession(
     private fun startGameLoop() {
         gameLoopJob?.cancel()
         if (!isHost) startLinkWatch()
+        startNoteWatch()
         val g = generation
         gameLoopJob = scope.launch {
             var sinceTouch = 0L
@@ -2285,6 +2373,8 @@ class OnlineSession(
         resyncJob = null
         linkJob?.cancel()
         linkJob = null
+        noteJob?.cancel()
+        noteJob = null
         socket.close()
     }
 
@@ -2327,6 +2417,10 @@ class OnlineSession(
         flags = emptyList()
         link = LinkState.OK
         linkMessage = null
+        liveNote = null
+        flashText = null
+        slowLink = false
+        tapSentAt = 0L
         game = null
         inGame = false
         gameNo = 0
@@ -2450,7 +2544,7 @@ class OnlineSession(
         /** How often the room screen asks the server for the room, in milliseconds. */
         const val POLL_INTERVAL_MS = 1500L
         const val MSG_GENERIC = "Something went wrong. Please try again."
-        const val MSG_NO_NET = "Online needs an internet connection."
+        const val MSG_NO_NET = "Couldn't reach the server. Your internet may be off or slow - please try again."
         const val MSG_ROOM_CLOSED = "The host closed the room."
         const val MSG_GAME_ENDED = "The host ended the game."
         const val MSG_REMOVED = "You were removed by the host."
@@ -2474,6 +2568,24 @@ class OnlineSession(
         const val RESULT_RETRY_MS = 5_000L
         const val END_ROOM_TRIES = 4
         const val END_ROOM_RETRY_MS = 2_000L
+
+        // Slow-connection notes (kept short: the note must fit on one line over the board).
+        const val MSG_SLOW = "Slow connection - moves may be late"
+        const val MSG_SLOW_HOST = "Your connection is slow"
+        const val MSG_TAP_LOST = "Tap not sent - slow connection"
+        const val MSG_TAP_SLOW = "Still waiting for the host..."
+
+        /** A heartbeat answer slower than this, or one still unanswered after [SLOW_PENDING_MS], means a slow link. */
+        const val SLOW_RTT_MS = 1_500L
+        const val SLOW_PENDING_MS = 3_000L
+
+        /** A tap whose answer (the next state) has not come after this long is reported. */
+        const val TAP_WAIT_MS = 4_000L
+        const val NOTE_STEP_MS = 1_000L
+        const val NOTE_FLASH_MS = 4_000L
+
+        /** A room-screen answer slower than this shows "Slow connection...". */
+        const val POLL_SLOW_MS = 2_500L
 
         const val LINK_STEP_MS = 1_000L
         const val LINK_GRACE_MS = 2_000L

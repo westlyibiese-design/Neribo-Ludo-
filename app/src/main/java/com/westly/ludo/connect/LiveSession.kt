@@ -136,4 +136,10 @@ interface LiveSession {
      * lost its connection) or "Waiting for the host..." (the host's phone is gone). Null = the screen's own text.
      */
     val linkMessage: String? get() = null
+
+    /**
+     * Online: a small note shown over the board that does not cover the game, for example "Slow connection"
+     * or a short notice that a tap did not go through. Null = nothing to say.
+     */
+    val liveNote: String? get() = null
 }

@@ -445,6 +445,9 @@ private fun ColumnScope.OnlineRoomBody(session: OnlineSession, room: OnlineRoom,
     if (session.roomLink == OnlineLink.OFFLINE) {
         ConnectNotice("No internet. Trying again...", u)
         Spacer(Modifier.height(u * 2f))
+    } else if (session.roomSlow) {
+        ConnectNotice("Slow connection... please wait", u)
+        Spacer(Modifier.height(u * 2f))
     }
     OnlineText("Room code", u, 3.8f, color = Color.White.copy(alpha = 0.85f), maxLines = 1)
     Spacer(Modifier.height(u * 1f))

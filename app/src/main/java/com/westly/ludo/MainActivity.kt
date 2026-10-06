@@ -842,12 +842,15 @@ fun LudoScreen(
                     else -> null
                 }
                 val watchers = if (cs.isHost) cs.watcherCount else 0
-                if (statusLine != null || waitSeat >= 0 || watchers > 0) {
+                // Online: "Slow connection" and similar, but only while no covering panel already explains things.
+                val liveNote = if (cs.link == LinkState.OK && cs.finalText == null) cs.liveNote else null
+                if (statusLine != null || waitSeat >= 0 || watchers > 0 || liveNote != null) {
                     Column(
                         Modifier.align(Alignment.TopCenter).padding(top = boardTop + u * 1f),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(u * 1f)
                     ) {
+                        if (liveNote != null) ConnectNotice(liveNote, u)
                         if (statusLine != null) ConnectNotice(statusLine, u)
                         if (waitSeat >= 0) {
                             ConnectWaitBanner(
