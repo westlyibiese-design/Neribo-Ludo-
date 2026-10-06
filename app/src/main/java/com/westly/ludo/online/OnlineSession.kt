@@ -142,10 +142,10 @@ class OnlineSession(
         private set
 
     var roomLink by mutableStateOf(OnlineLink.OK)
+        private set
 
     /** True while the room screen's last answer from the server was slow (so the person knows the app is not frozen). */
     var roomSlow by mutableStateOf(false)
-        private set
         private set
 
     /** The live room the server reports for this person; drives the "Return to room" button. */
