@@ -22,7 +22,8 @@ import androidx.compose.ui.unit.dp
  */
 enum class LudoIcon {
     Close, Flag, Power, Gear, Exit, Pen, Eye, Redo, Bars, Chevron, Book, Sliders,
-    Star, Sound, Mute, Vibrate, VibrateOff
+    Star, Sound, Mute, Vibrate, VibrateOff,
+    Minus, Plus, Users, Crown
 }
 
 private fun Path.line(x1: Float, y1: Float, x2: Float, y2: Float) {
@@ -149,6 +150,25 @@ private fun buildIconPath(icon: LudoIcon): Path {
             p.line(4f, 8f, 4f, 16f)
             p.line(20f, 8f, 20f, 16f)
             p.line(3f, 3f, 21f, 21f)
+        }
+        LudoIcon.Minus -> {
+            p.line(5f, 12f, 19f, 12f)
+        }
+        LudoIcon.Plus -> {
+            p.line(12f, 5f, 12f, 19f)
+            p.line(5f, 12f, 19f, 12f)
+        }
+        LudoIcon.Users -> {
+            p.circle(9f, 8f, 3.2f)
+            p.moveTo(3f, 20f)
+            p.cubicTo(3f, 15.5f, 5.5f, 13.5f, 9f, 13.5f)
+            p.cubicTo(12.5f, 13.5f, 15f, 15.5f, 15f, 20f)
+            p.circle(17f, 9f, 2.5f)
+            p.moveTo(17f, 13.8f)
+            p.cubicTo(19.5f, 13.8f, 21f, 15.5f, 21f, 18.5f)
+        }
+        LudoIcon.Crown -> {
+            p.poly(3f, 8f, 7.5f, 12.5f, 12f, 4.5f, 16.5f, 12.5f, 21f, 8f, 19f, 19f, 5f, 19f, closed = true)
         }
     }
     return p
