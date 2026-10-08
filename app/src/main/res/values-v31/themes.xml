@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.Ludo" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#FF141414</item>
+        <item name="android:windowBackground">#FF0B1226</item>
         <!-- Android 12+ system splash: plain dark background, no icon, then the logo animation starts. -->
-        <item name="android:windowSplashScreenBackground">#FF141414</item>
+        <item name="android:windowSplashScreenBackground">#FF0B1226</item>
         <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_empty</item>
     </style>
 </resources>

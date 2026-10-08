@@ -2,6 +2,6 @@
 <resources>
     <style name="Theme.Ludo" parent="android:Theme.Material.NoActionBar">
         <!-- Same dark color the logo animation starts on, so there is no black/faded-icon flash. -->
-        <item name="android:windowBackground">#FF141414</item>
+        <item name="android:windowBackground">#FF0B1226</item>
     </style>
 </resources>
