@@ -1,37 +1,50 @@
 package com.westly.ludo.ui.dialogs
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 
-/** A simple four-colour "G" drawn in code, for the white Google button. Decorative only. */
+private val GRed = Color(0xFFEA4335)
+private val GYellow = Color(0xFFFBBC05)
+private val GGreen = Color(0xFF34A853)
+private val GBlue = Color(0xFF4285F4)
+
+/**
+ * The HTML's ".g": a bold Arial-style "G" (24sp) filled with a four-colour conic gradient, red at
+ * the top, yellow on the right, green at the bottom and blue on the left (CSS: from -45deg).
+ * A sweep gradient starts at 3 o'clock, so each colour band is 90 degrees wide and turned by 90.
+ * Decorative only.
+ */
 @Composable
-fun GoogleMark(modifier: Modifier = Modifier, markSize: Dp = 22.dp) {
-    Canvas(modifier.size(markSize)) {
-        val s = this.size.minDimension
-        val stroke = s * 0.17f
-        val inset = stroke / 2f
-        val arcSize = Size(s - stroke, s - stroke)
-        val topLeft = Offset(inset, inset)
-        val style = Stroke(width = stroke)
-        // Angles: 0 = 3 o'clock, going clockwise. The gap at the right is the opening of the G.
-        drawArc(Color(0xFFEA4335), 225f, 90f, false, topLeft, arcSize, style = style)
-        drawArc(Color(0xFFFBBC05), 135f, 90f, false, topLeft, arcSize, style = style)
-        drawArc(Color(0xFF34A853), 45f, 90f, false, topLeft, arcSize, style = style)
-        drawArc(Color(0xFF4285F4), -15f, 60f, false, topLeft, arcSize, style = style)
-        // blue bar of the G
-        drawLine(
-            color = Color(0xFF4285F4),
-            start = Offset(s * 0.5f, s * 0.5f),
-            end = Offset(s - inset, s * 0.5f),
-            strokeWidth = stroke
-        )
-    }
+fun GoogleMark(modifier: Modifier = Modifier) {
+    val sweep = Brush.sweepGradient(
+        0.000f to GYellow,
+        0.125f to GYellow,
+        0.125f to GGreen,
+        0.375f to GGreen,
+        0.375f to GBlue,
+        0.625f to GBlue,
+        0.625f to GRed,
+        0.875f to GRed,
+        0.875f to GYellow,
+        1.000f to GYellow
+    )
+    BasicText(
+        "G",
+        modifier = modifier.clearAndSetSemantics { },
+        style = TextStyle(
+            brush = sweep,
+            fontSize = 24.sp,
+            fontFamily = FontFamily.SansSerif,
+            fontWeight = FontWeight.ExtraBold
+        ),
+        maxLines = 1
+    )
 }

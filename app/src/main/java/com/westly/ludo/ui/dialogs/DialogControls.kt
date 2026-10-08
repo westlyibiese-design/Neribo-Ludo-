@@ -33,9 +33,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ClipOp
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -45,6 +49,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -74,7 +79,10 @@ internal fun displayStyle(
     letterSpacing = letterSpacing
 )
 
-/** Figtree (body text). [weight] is Medium, SemiBold or Bold. */
+/**
+ * Figtree (body text). [weight] is Medium, SemiBold or Bold. The line height is 1.45 x the size
+ * unless [lineHeight] is given (the HTML body uses line-height 1.45).
+ */
 @Composable
 internal fun bodyStyle(
     size: TextUnit,
@@ -88,7 +96,7 @@ internal fun bodyStyle(
     fontFamily = LocalLudoFonts.current.body,
     fontWeight = weight,
     textAlign = align,
-    lineHeight = lineHeight
+    lineHeight = if (lineHeight == TextUnit.Unspecified) size * 1.45f else lineHeight
 )
 
 // ---------------------------------------------------------------------------
@@ -115,12 +123,14 @@ fun ChunkyButton(
     val press by animateFloatAsState(if (pressed && enabled) 1f else 0f, spec, label = "chunkyPress")
     val shape = RoundedCornerShape(18.dp)
     val onePx = LocalDensity.current.density
-    val innerBorder = tone.innerBorder
+    // disabled: opacity .4 and grayscale(.5), like the HTML
+    val look = if (enabled) tone else tone.grayscale(0.5f)
+    val innerBorder = look.innerBorder
     val label = displayStyle(
         size = 17.sp,
-        color = tone.content,
+        color = look.content,
         align = TextAlign.Center,
-        shadow = if (tone.textShadow) Shadow(Color(0x33000000), Offset(0f, onePx), 0f) else null
+        shadow = if (look.textShadow) Shadow(Color(0x33000000), Offset(0f, onePx), 0f) else null
     )
     Box(
         modifier
@@ -130,14 +140,14 @@ fun ChunkyButton(
             .drawBehind {
                 val edge = 5.dp.toPx() * (1f - press) + 1.dp.toPx() * press
                 drawRoundRect(
-                    color = tone.edge,
+                    color = look.edge,
                     topLeft = Offset(0f, edge),
                     size = size,
                     cornerRadius = CornerRadius(18.dp.toPx())
                 )
             }
             .clip(shape)
-            .background(Brush.verticalGradient(listOf(tone.top, tone.bottom)))
+            .background(Brush.verticalGradient(listOf(look.top, look.bottom)))
             .then(if (innerBorder != null) Modifier.border(1.5.dp, innerBorder, shape) else Modifier)
             .clickable(
                 interactionSource = source,
@@ -157,7 +167,7 @@ fun ChunkyButton(
             if (leading != null) {
                 leading()
             } else if (icon != null) {
-                LudoIconView(icon, iconSize = 21.dp, tint = tone.content)
+                LudoIconView(icon, iconSize = 21.25.dp, tint = look.content)
             }
             BasicText(text, style = label, modifier = Modifier.weight(1f, fill = false))
         }
@@ -204,7 +214,7 @@ fun GhostButton(
             horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (icon != null) LudoIconView(icon, iconSize = 21.dp, tint = Color.White)
+            if (icon != null) LudoIconView(icon, iconSize = 21.25.dp, tint = Color.White)
             BasicText(
                 text,
                 style = displayStyle(17.sp, Color.White, TextAlign.Center),
@@ -259,14 +269,15 @@ fun InfoRow(
     leading: (@Composable () -> Unit)? = null,
     tag: (@Composable () -> Unit)? = null,
     dimmed: Boolean = false,
-    topDivider: Boolean = false
+    topDivider: Boolean = false,
+    verticalPadding: Dp = 11.dp
 ) {
     Column(modifier.fillMaxWidth().alpha(if (dimmed) 0.45f else 1f)) {
         if (topDivider) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(GoldTheme.Line))
         }
         Row(
-            Modifier.fillMaxWidth().padding(vertical = 11.dp),
+            Modifier.fillMaxWidth().padding(vertical = verticalPadding),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -280,7 +291,7 @@ fun InfoRow(
                 if (subtitle != null) {
                     BasicText(
                         subtitle,
-                        style = bodyStyle(14.sp, FontWeight.Medium, GoldTheme.Muted, lineHeight = 19.sp)
+                        style = bodyStyle(14.sp, FontWeight.Medium, GoldTheme.Muted, lineHeight = 18.9.sp)
                     )
                 }
             }
@@ -362,10 +373,11 @@ fun OptionChip(
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (icon != null) LudoIconView(icon, iconSize = 20.dp, tint = Color.White)
+            val textColor = if (selected) Color.White else GoldTheme.Cream
+            if (icon != null) LudoIconView(icon, iconSize = 18.75.dp, tint = textColor)
             BasicText(
                 label,
-                style = bodyStyle(15.sp, FontWeight.Bold, if (selected) Color.White else GoldTheme.Cream)
+                style = bodyStyle(15.sp, FontWeight.Bold, textColor, lineHeight = 18.sp)
             )
         }
     }
@@ -413,10 +425,11 @@ fun SegmentedToggle(
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (option.icon != null) LudoIconView(option.icon, iconSize = 21.dp, tint = Color.White)
+                    val textColor = if (selected) Color.White else GoldTheme.Cream
+                    if (option.icon != null) LudoIconView(option.icon, iconSize = 21.25.dp, tint = textColor)
                     BasicText(
                         option.label,
-                        style = bodyStyle(17.sp, FontWeight.Bold, if (selected) Color.White else GoldTheme.Cream)
+                        style = bodyStyle(17.sp, FontWeight.Bold, textColor, lineHeight = 20.sp)
                     )
                 }
             }
@@ -428,18 +441,27 @@ fun SegmentedToggle(
 // Avatars and round icons
 // ---------------------------------------------------------------------------
 
-/** Coloured circle with the first letter of [name]. [seat] 0..3 = Red, Green, Yellow, Blue; anything else = grey. */
+/**
+ * Coloured circle with the first letter of [name]. [seat] 0..3 = Red, Green, Yellow, Blue; anything
+ * else = grey. Give [icon] to show an icon instead of the letter (the grey "You're out" avatar).
+ * [grayscale] washes the colours out (0 to 1). [stamp] adds the pale red ring and the taller edge
+ * of the OUT stamp on the round-result page.
+ */
 @Composable
 fun SeatAvatar(
     seat: Int,
     name: String,
     modifier: Modifier = Modifier,
-    avatarSize: Dp = 40.dp
+    avatarSize: Dp = 40.dp,
+    grayscale: Float = 0f,
+    icon: LudoIcon? = null,
+    stamp: Boolean = false
 ) {
-    val colors = SeatColors.of(seat)
+    val colors = SeatColors.of(seat).grayscale(grayscale)
     val letter = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
     val px = with(LocalDensity.current) { avatarSize.toPx() }
     val letterSize = with(LocalDensity.current) { (avatarSize * 0.46f).toSp() }
+    val onePx = LocalDensity.current.density
     val brush = Brush.radialGradient(
         colors = listOf(colors.main, colors.dark),
         center = Offset(px * 0.32f, px * 0.28f),
@@ -449,24 +471,88 @@ fun SeatAvatar(
         modifier
             .size(avatarSize)
             .drawBehind {
+                val radius = this.size.minDimension / 2f
+                val edge = (if (stamp) 3.dp else 2.dp).toPx()
                 drawCircle(
                     color = colors.dark,
-                    radius = this.size.minDimension / 2f,
-                    center = Offset(this.size.width / 2f, this.size.height / 2f + 2.dp.toPx())
+                    radius = radius,
+                    center = Offset(this.size.width / 2f, this.size.height / 2f + edge)
                 )
+                if (stamp) {
+                    drawCircle(
+                        color = Color(0x40F06B60),
+                        radius = radius + 6.dp.toPx(),
+                        center = Offset(this.size.width / 2f, this.size.height / 2f)
+                    )
+                }
             }
             .clip(CircleShape)
             .background(brush)
+            .drawBehind {
+                // inset 0 1px 0 #fff6: a thin light crescent along the top edge
+                val w = this.size.width
+                val h = this.size.height
+                val whole = Path().apply { addOval(Rect(0f, 0f, w, h)) }
+                val lowered = Path().apply { addOval(Rect(0f, 1.dp.toPx(), w, h + 1.dp.toPx())) }
+                clipPath(whole) {
+                    clipPath(lowered, ClipOp.Difference) {
+                        drawRect(Color(0x66FFFFFF))
+                    }
+                }
+            }
             .clearAndSetSemantics { },
         contentAlignment = Alignment.Center
     ) {
+        if (icon != null) {
+            LudoIconView(icon, iconSize = avatarSize * 0.46f, tint = Color.White)
+        } else {
+            BasicText(
+                letter,
+                style = displayStyle(
+                    letterSize,
+                    Color.White,
+                    TextAlign.Center,
+                    shadow = Shadow(Color(0x33000000), Offset(0f, onePx), 0f)
+                ),
+                maxLines = 1
+            )
+        }
+    }
+}
+
+/**
+ * Quick-pick name chip of the Family dialog: a plain pill (white 6% fill, thin line border, no gold).
+ * Disabled = 35% opacity with the name struck through (the name is already used).
+ */
+@Composable
+fun RosterChip(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    val shape = RoundedCornerShape(50)
+    val source = remember { MutableInteractionSource() }
+    Box(
+        modifier
+            .alpha(if (enabled) 1f else 0.35f)
+            .clip(shape)
+            .background(Color(0x0FFFFFFF))
+            .border(1.dp, GoldTheme.Line, shape)
+            .clickable(
+                interactionSource = source,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            )
+            .padding(horizontal = 14.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center
+    ) {
         BasicText(
-            letter,
-            style = displayStyle(
-                letterSize,
-                Color.White,
-                TextAlign.Center,
-                shadow = Shadow(Color(0x33000000), Offset(0f, 2f), 0f)
+            label,
+            style = bodyStyle(15.sp, FontWeight.SemiBold, GoldTheme.Cream).merge(
+                TextStyle(textDecoration = if (enabled) TextDecoration.None else TextDecoration.LineThrough)
             ),
             maxLines = 1
         )

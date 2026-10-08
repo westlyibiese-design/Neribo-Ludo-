@@ -1,5 +1,7 @@
 package com.westly.ludo.ui.dialogs
 
+import android.os.Build
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
@@ -45,6 +47,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -59,12 +62,22 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import kotlinx.coroutines.launch
 
+/** --ease: cubic-bezier(.2,.8,.2,1) */
 private val EntryEasing = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)
 
+/** The CSS default "ease", used by the scrim fade. */
+private val FadeEasing = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)
+
 /**
- * The window every Ludo Mate dialog sits in: full-screen dark scrim (fades in), and the content
- * fades, scales 0.94 -> 1 and slides up 18dp in 320ms. Skipped when animations are off.
+ * The window every Ludo Mate dialog sits in. Full-screen dark scrim (fades in over 250ms, with a
+ * 12px blur of the game behind on Android 12 and newer).
+ *
+ * The content comes in one of two ways, like the HTML:
+ *  - normal dialog ([rise] = false): fades, scales 0.94 -> 1 and slides up 18dp in 320ms
+ *  - full-screen page ([rise] = true): fades and slides up 24dp in 400ms, no scale
+ * Both are skipped when animations are off.
  *
  * [onBack] runs when the Back button is pressed. Pass null to block Back (full-screen results).
  */
@@ -72,6 +85,7 @@ private val EntryEasing = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)
 @Composable
 internal fun DialogWindow(
     onBack: (() -> Unit)?,
+    rise: Boolean = false,
     content: @Composable BoxScope.() -> Unit
 ) {
     val context = LocalContext.current
@@ -91,13 +105,29 @@ internal fun DialogWindow(
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
         SideEffect { window?.setDimAmount(0f) }
 
+        // backdrop-filter: blur(12px) on the layer. Only phones with Android 12+ (and blur turned
+        // on in the system) show it; everywhere else the scrim alone is used.
+        val blurPx = (12f * LocalDensity.current.density).toInt()
+        LaunchedEffect(window) {
+            if (window != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+                val params = window.attributes
+                params.blurBehindRadius = blurPx
+                window.attributes = params
+            }
+        }
+
         BackHandler(enabled = true) { onBack?.invoke() }
 
+        val fade = remember { Animatable(if (motion) 0f else 1f) }
         val progress = remember { Animatable(if (motion) 0f else 1f) }
         LaunchedEffect(Unit) {
-            if (motion) progress.animateTo(1f, tween(320, easing = EntryEasing))
+            if (motion) {
+                launch { fade.animateTo(1f, tween(250, easing = FadeEasing)) }
+                progress.animateTo(1f, tween(if (rise) 400 else 320, easing = EntryEasing))
+            }
         }
-        val slidePx = with(LocalDensity.current) { 18.dp.toPx() }
+        val slidePx = with(LocalDensity.current) { (if (rise) 24.dp else 18.dp).toPx() }
 
         CompositionLocalProvider(
             LocalLudoFonts provides fonts,
@@ -107,7 +137,7 @@ internal fun DialogWindow(
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .graphicsLayer { alpha = (progress.value * 1.28f).coerceAtMost(1f) }
+                        .graphicsLayer { alpha = fade.value }
                         .background(GoldTheme.Scrim)
                 )
                 Box(
@@ -116,8 +146,10 @@ internal fun DialogWindow(
                         .graphicsLayer {
                             val p = progress.value
                             alpha = p
-                            scaleX = 0.94f + 0.06f * p
-                            scaleY = 0.94f + 0.06f * p
+                            if (!rise) {
+                                scaleX = 0.94f + 0.06f * p
+                                scaleY = 0.94f + 0.06f * p
+                            }
                             translationY = (1f - p) * slidePx
                         },
                     content = content
@@ -127,12 +159,41 @@ internal fun DialogWindow(
     }
 }
 
+/** The shape of the gold frame (30dp corners) shared by the dialogs and the OUT stamp card. */
+internal val GoldFrameShape = RoundedCornerShape(30.dp)
+
+/**
+ * The gold frame: navy gradient, 2dp gold border, soft gold glow and a thin white highlight along
+ * the top edge. Used by [GoldDialog] and by the OUT stamp card on the round-result page.
+ */
+internal fun Modifier.goldFrame(): Modifier = this
+    .shadow(
+        elevation = 28.dp,
+        shape = GoldFrameShape,
+        clip = false,
+        ambientColor = GoldTheme.Gold.copy(alpha = 0.55f),
+        spotColor = Color.Black.copy(alpha = 0.8f)
+    )
+    .background(Brush.verticalGradient(listOf(GoldTheme.Navy1, GoldTheme.Navy2)), GoldFrameShape)
+    .border(2.dp, GoldTheme.Gold, GoldFrameShape)
+    .drawBehind {
+        // thin white 12% highlight along the top edge
+        drawLine(
+            color = Color(0x1FFFFFFF),
+            start = Offset(30.dp.toPx(), 2.5.dp.toPx()),
+            end = Offset(this.size.width - 30.dp.toPx(), 2.5.dp.toPx()),
+            strokeWidth = 1.dp.toPx()
+        )
+    }
+
 /**
  * The standard gold-framed dialog: icon badge on the top edge, gold title, optional lead text,
  * a red close button, and [content] below. Content scrolls on small screens or large fonts.
  *
  * [onClose] runs for the X button and the Back button.
  * Give [badgeIcon] for an icon badge, or [badgeLetter] for a letter badge.
+ * [leadContent] replaces [lead] when the line under the title is more than plain text.
+ * The lead line is hidden on screens 640dp tall or less, like the HTML does.
  */
 @Composable
 fun GoldDialog(
@@ -144,16 +205,18 @@ fun GoldDialog(
     badgeTone: ChunkyTone = ChunkyTones.Red,
     lead: String? = null,
     showClose: Boolean = true,
+    leadContent: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     DialogWindow(onBack = onClose) {
         BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
             val minHeight = if (maxHeight > 32.dp) maxHeight - 32.dp else 0.dp
+            // 4dp here + 12dp inside GoldCard = the 16dp side margin of the HTML layer
             Column(
                 Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
+                    .padding(horizontal = 4.dp, vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Box(
@@ -163,6 +226,7 @@ fun GoldDialog(
                     GoldCard(
                         title = title,
                         lead = lead,
+                        leadContent = leadContent,
                         onClose = onClose,
                         showClose = showClose,
                         badgeIcon = badgeIcon,
@@ -184,6 +248,7 @@ private val BadgeRoom = 40.dp
 private fun GoldCard(
     title: String,
     lead: String?,
+    leadContent: (@Composable () -> Unit)?,
     onClose: () -> Unit,
     showClose: Boolean,
     badgeIcon: LudoIcon?,
@@ -192,8 +257,9 @@ private fun GoldCard(
     modifier: Modifier,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val shape = RoundedCornerShape(30.dp)
     val onePx = LocalDensity.current.density
+    val shortScreen = LocalConfiguration.current.screenHeightDp <= 640
+    val hasLead = !shortScreen && (leadContent != null || lead != null)
     // Outer box is 12dp wider each side and BadgeRoom taller than the frame, so the badge and the
     // close button sit inside its bounds and can be tapped.
     Box(modifier.widthIn(max = 444.dp).fillMaxWidth()) {
@@ -201,24 +267,7 @@ private fun GoldCard(
             Modifier
                 .padding(start = 12.dp, end = 12.dp, top = BadgeRoom)
                 .fillMaxWidth()
-                .shadow(
-                    elevation = 28.dp,
-                    shape = shape,
-                    clip = false,
-                    ambientColor = GoldTheme.Gold.copy(alpha = 0.55f),
-                    spotColor = Color.Black.copy(alpha = 0.8f)
-                )
-                .background(Brush.verticalGradient(listOf(GoldTheme.Navy1, GoldTheme.Navy2)), shape)
-                .border(2.dp, GoldTheme.Gold, shape)
-                .drawBehind {
-                    // thin white 12% highlight along the top edge
-                    drawLine(
-                        color = Color(0x1FFFFFFF),
-                        start = Offset(30.dp.toPx(), 2.5.dp.toPx()),
-                        end = Offset(this.size.width - 30.dp.toPx(), 2.5.dp.toPx()),
-                        strokeWidth = 1.dp.toPx()
-                    )
-                }
+                .goldFrame()
                 .padding(start = 22.dp, end = 22.dp, top = 52.dp, bottom = 22.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -229,18 +278,22 @@ private fun GoldCard(
                     size = 27.sp,
                     color = GoldTheme.Gold,
                     align = TextAlign.Center,
-                    shadow = Shadow(Color(0x70000000), Offset(0f, 2f * onePx), 0f),
-                    lineHeight = 30.sp,
+                    shadow = Shadow(Color(0x77000000), Offset(0f, 2f * onePx), 0f),
+                    lineHeight = 29.7.sp,
                     letterSpacing = (-0.27).sp
                 )
             )
-            if (lead != null) {
+            if (hasLead) {
                 Spacer(Modifier.height(8.dp))
-                BasicText(
-                    lead,
-                    modifier = Modifier.widthIn(max = 300.dp),
-                    style = bodyStyle(16.sp, FontWeight.Medium, GoldTheme.Muted, TextAlign.Center, 23.sp)
-                )
+                if (leadContent != null) {
+                    leadContent()
+                } else if (lead != null) {
+                    BasicText(
+                        lead,
+                        modifier = Modifier.widthIn(max = 326.dp),
+                        style = bodyStyle(16.sp, FontWeight.Medium, GoldTheme.Muted, TextAlign.Center)
+                    )
+                }
             }
             Spacer(Modifier.height(18.dp))
             content()
@@ -250,16 +303,19 @@ private fun GoldCard(
             icon = badgeIcon,
             letter = badgeLetter,
             tone = badgeTone,
-            modifier = Modifier.align(Alignment.TopCenter).offset(y = 3.dp)
+            modifier = Modifier.align(Alignment.TopCenter).offset(y = 5.dp)
         )
 
         if (showClose) {
-            CloseX(onClick = onClose, modifier = Modifier.align(Alignment.TopEnd).offset(y = 24.dp))
+            CloseX(
+                onClick = onClose,
+                modifier = Modifier.align(Alignment.TopEnd).offset(x = (-2).dp, y = 26.dp)
+            )
         }
     }
 }
 
-/** 64dp badge: gradient, 3dp gold ring, 3dp dark outer ring. */
+/** 64dp badge: gradient, 3dp gold ring, 3dp dark outer ring. Centred on the frame's top edge. */
 @Composable
 private fun IconBadge(icon: LudoIcon?, letter: String?, tone: ChunkyTone, modifier: Modifier) {
     Box(
@@ -291,7 +347,10 @@ private fun IconBadge(icon: LudoIcon?, letter: String?, tone: ChunkyTone, modifi
     }
 }
 
-/** Red round X. The visible circle is 40dp, the tap area 48dp. */
+/**
+ * Red round X. The visible circle is 40dp, the tap area 48dp. Its circle sits 10dp above and
+ * 6dp outside the frame's top-right corner, like the HTML.
+ */
 @Composable
 private fun CloseX(onClick: () -> Unit, modifier: Modifier) {
     val source = remember { MutableInteractionSource() }

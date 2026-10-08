@@ -38,6 +38,21 @@ object GoldTheme {
     /** pale red used for error text and struck-through rounds */
     val ErrorText = Color(0xFFFFB4AD)
 
+    /** black at 26%: tie-break rows */
+    val RowFill = Color(0x42000000)
+
+    /** yellow at 9%: the tie-break row whose turn it is */
+    val TurnFill = Color(0x17FFD85E)
+
+    /** red at 18%: the tie-break row that is out */
+    val OutFill = Color(0x2ED6362F)
+
+    /** gold at 20%: the turning rays on the winner page */
+    val Ray = Color(0x33F0C35A)
+
+    /** #f06b60: border of a name field that has an error */
+    val ErrorBorder = Color(0xFFF06B60)
+
     val TagBad = Color(0xFFD6362F)
     val TagGood = Color(0xFF2E9B4E)
     val TagNeutral = Color(0x1AFFFFFF)
@@ -79,8 +94,33 @@ object ChunkyTones {
     )
 }
 
+/**
+ * Same as the CSS grayscale() filter: 0 = unchanged, 1 = fully grey. Used for disabled buttons
+ * (50%), a player who is out (70%) and the OUT stamp avatar (35%).
+ */
+internal fun Color.grayscale(amount: Float): Color {
+    val gray = 0.2126f * red + 0.7152f * green + 0.0722f * blue
+    return Color(
+        red + (gray - red) * amount,
+        green + (gray - green) * amount,
+        blue + (gray - blue) * amount,
+        alpha
+    )
+}
+
+internal fun ChunkyTone.grayscale(amount: Float): ChunkyTone = ChunkyTone(
+    top = top.grayscale(amount),
+    bottom = bottom.grayscale(amount),
+    edge = edge.grayscale(amount),
+    content = content.grayscale(amount),
+    innerBorder = innerBorder?.grayscale(amount),
+    textShadow = textShadow
+)
+
 /** A seat colour: [main] and [dark] (the dark one is the avatar edge). */
-class SeatColor(val name: String, val main: Color, val dark: Color)
+class SeatColor(val name: String, val main: Color, val dark: Color) {
+    fun grayscale(amount: Float): SeatColor = SeatColor(name, main.grayscale(amount), dark.grayscale(amount))
+}
 
 object SeatColors {
     /** Seat 0 = Red, 1 = Green, 2 = Yellow, 3 = Blue (same order as the game). */

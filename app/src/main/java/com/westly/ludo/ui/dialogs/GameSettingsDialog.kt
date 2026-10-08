@@ -39,7 +39,7 @@ fun GoldGameSettingsDialog(
     GoldDialog(
         title = "Game settings",
         badgeIcon = LudoIcon.Gear,
-        badgeTone = ChunkyTones.Gold,
+        badgeTone = ChunkyTones.Yellow,
         onClose = onClose,
         modifier = modifier
     ) {

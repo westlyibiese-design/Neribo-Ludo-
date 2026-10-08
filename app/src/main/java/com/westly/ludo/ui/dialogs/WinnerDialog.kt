@@ -1,47 +1,43 @@
 package com.westly.ludo.ui.dialogs
 
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
-import kotlin.math.cos
-import kotlin.math.sin
 
 /**
- * Full-screen winner page: gold crown badge on slowly turning gold rays, "Winner!" in a gold
- * gradient, the winner's row with a "1st" tag, then "Play again" and "Go back to menu".
+ * Full-screen winner page: gold crown badge, "You are the", "Winner!" in a gold gradient on
+ * slowly turning gold rays, a line of praise, the winner's row with a "1st" tag, then
+ * "Play again" and "Go back to menu".
  *
+ * The texts default to the HTML copy, which is written for "you won". Change [eyebrow],
+ * [subtitle] and [scoreLine] when somebody else won (pass null to hide a line).
  * [onMenu] is also called by the Back button. For a person who cannot start the next game (for
  * example a guest in an online game) pass [playAgainEnabled] = false and a [waitingText].
  */
@@ -52,41 +48,15 @@ fun GoldWinnerDialog(
     onMenu: () -> Unit,
     modifier: Modifier = Modifier,
     winnerSeat: Int = 0,
-    subtitle: String? = null,
-    scoreLine: String? = null,
+    eyebrow: String? = "You are the",
+    subtitle: String? = "You conquered the board.",
+    scoreLine: String? = "You played like a legend!",
     playAgainEnabled: Boolean = true,
     waitingText: String? = null
 ) {
-    FullScreenGold(onBack = onMenu) {
-        Box(modifier.size(280.dp), contentAlignment = Alignment.Center) {
-            Rays(Modifier.size(280.dp))
-            CrownBadge()
-        }
-        Spacer(Modifier.height(8.dp))
-        BasicText(
-            "Winner!",
-            modifier = Modifier.semantics { heading() },
-            style = displayStyle(46.sp, GoldTheme.Gold, TextAlign.Center).copy(
-                brush = Brush.verticalGradient(listOf(Color(0xFFFFE9A6), GoldTheme.Gold, Color(0xFFD99A1E)))
-            )
-        )
-        if (subtitle != null) {
-            Spacer(Modifier.height(6.dp))
-            BasicText(
-                subtitle,
-                style = bodyStyle(16.sp, FontWeight.Medium, GoldTheme.Muted, TextAlign.Center, 23.sp)
-            )
-        }
-        Spacer(Modifier.height(18.dp))
-        InfoPanel {
-            InfoRow(
-                title = winnerName,
-                subtitle = scoreLine,
-                leading = { SeatAvatar(winnerSeat, winnerName, avatarSize = 44.dp) },
-                tag = { StatusTag("1st", TagKind.Good) }
-            )
-        }
-        DialogButtons {
+    FullScreenGold(
+        onBack = onMenu,
+        footer = {
             if (waitingText != null) {
                 BasicText(
                     waitingText,
@@ -97,61 +67,103 @@ fun GoldWinnerDialog(
             ChunkyButton("Play again", onPlayAgain, tone = ChunkyTones.Green, enabled = playAgainEnabled)
             ChunkyButton("Go back to menu", onMenu, tone = ChunkyTones.Navy)
         }
-    }
-}
-
-@Composable
-private fun CrownBadge() {
-    Box(
-        Modifier
-            .size(112.dp)
-            .shadow(14.dp, CircleShape, clip = false, ambientColor = GoldTheme.Gold, spotColor = Color.Black)
-            .background(GoldTheme.Navy2, CircleShape)
-            .padding(4.dp)
-            .clip(CircleShape)
-            .background(Brush.verticalGradient(listOf(ChunkyTones.Gold.top, ChunkyTones.Gold.bottom)))
-            .border(3.dp, Color(0xFFFFF3C4), CircleShape),
-        contentAlignment = Alignment.Center
     ) {
-        LudoIconView(LudoIcon.Crown, iconSize = 56.dp, tint = ChunkyTones.Gold.content)
+        WinColumn(modifier) {
+            FullBadge(LudoIcon.Crown, ChunkyTones.Yellow, Modifier.padding(bottom = 6.dp), big = true)
+            if (eyebrow != null) {
+                BasicText(
+                    eyebrow,
+                    style = bodyStyle(16.sp, FontWeight.Bold, GoldTheme.Muted, TextAlign.Center)
+                )
+            }
+            WinnerTitle()
+            if (subtitle != null) {
+                BasicText(
+                    subtitle,
+                    modifier = Modifier.widthIn(max = 326.dp),
+                    style = bodyStyle(16.sp, FontWeight.Medium, GoldTheme.Muted, TextAlign.Center)
+                )
+            }
+            InfoPanel(Modifier.padding(top = 8.dp)) {
+                InfoRow(
+                    title = winnerName,
+                    subtitle = scoreLine,
+                    leading = { SeatAvatar(winnerSeat, winnerName) },
+                    tag = { StatusTag("1st", TagKind.Good) }
+                )
+            }
+        }
     }
 }
 
-/** Twelve soft gold wedges that turn once every 40 seconds (still when animations are off). */
+/**
+ * The centred column of the winner page. Behind it, 18 gold rays (8 degrees wide, every 20) fade
+ * out from a point 200dp below the top and turn once every 50 seconds (still when animations are off).
+ */
 @Composable
-private fun Rays(modifier: Modifier) {
+private fun WinColumn(modifier: Modifier, content: @Composable () -> Unit) {
     val motion = LocalMotionEnabled.current
     val turn = if (motion) {
-        val transition = rememberInfiniteTransition(label = "rays")
-        val value by transition.animateFloat(
+        rememberInfiniteTransition(label = "rays").animateFloat(
             initialValue = 0f,
             targetValue = 360f,
-            animationSpec = infiniteRepeatable(tween(40000, easing = LinearEasing), RepeatMode.Restart),
+            animationSpec = infiniteRepeatable(tween(50000, easing = LinearEasing)),
             label = "raysTurn"
         )
-        value
     } else {
-        0f
+        null
     }
-    Canvas(modifier.graphicsLayer { rotationZ = turn }) {
-        val radius = this.size.minDimension / 2f
-        val center = Offset(this.size.width / 2f, this.size.height / 2f)
-        val brush = Brush.radialGradient(
-            colors = listOf(GoldTheme.Gold.copy(alpha = 0.5f), Color.Transparent),
-            center = center,
-            radius = radius
+    Column(
+        modifier
+            .fillMaxWidth()
+            .drawBehind {
+                val angle = turn?.value ?: 0f
+                val cx = this.size.width / 2f
+                val cy = 200.dp.toPx()
+                val reach = 239.dp.toPx()
+                val brush = Brush.radialGradient(
+                    colors = listOf(GoldTheme.Ray, GoldTheme.Ray.copy(alpha = 0f)),
+                    center = Offset(cx, cy),
+                    radius = reach
+                )
+                for (k in 0 until 18) {
+                    drawArc(
+                        brush = brush,
+                        startAngle = angle - 90f + k * 20f,
+                        sweepAngle = 8f,
+                        useCenter = true,
+                        topLeft = Offset(cx - reach, cy - reach),
+                        size = Size(reach * 2f, reach * 2f)
+                    )
+                }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        content()
+    }
+}
+
+/** "Winner!": gold gradient letters over a solid dark-gold copy 4dp lower (the HTML drop-shadow). */
+@Composable
+private fun WinnerTitle() {
+    val width = LocalConfiguration.current.screenWidthDp
+    val size = (width * 0.15f).coerceIn(46f, 64f).sp
+    val gradient = Brush.verticalGradient(
+        0.0f to Color(0xFFFFF3B0),
+        0.6f to Color(0xFFF0B429),
+        1.0f to Color(0xFFB87A12)
+    )
+    Box(Modifier.semantics { heading() }, contentAlignment = Alignment.Center) {
+        BasicText(
+            "Winner!",
+            modifier = Modifier.offset(y = 4.dp).clearAndSetSemantics { },
+            style = displayStyle(size, Color(0xFF7A4E08), TextAlign.Center, lineHeight = size * 1.1f, letterSpacing = (-0.01).em)
         )
-        val wedges = 12
-        for (k in 0 until wedges) {
-            val start = Math.toRadians(k * 360.0 / wedges - 7.5)
-            val end = Math.toRadians(k * 360.0 / wedges + 7.5)
-            val path = Path().apply {
-                moveTo(center.x, center.y)
-                lineTo(center.x + radius * cos(start).toFloat(), center.y + radius * sin(start).toFloat())
-                lineTo(center.x + radius * cos(end).toFloat(), center.y + radius * sin(end).toFloat())
-                close()
-            }
-            drawPath(path, brush)
-        }
+        BasicText(
+            "Winner!",
+            style = displayStyle(size, GoldTheme.Gold, TextAlign.Center, lineHeight = size * 1.1f, letterSpacing = (-0.01).em)
+                .copy(brush = gradient)
+        )
     }
 }

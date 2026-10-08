@@ -6,173 +6,69 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /**
- * Line icons drawn in code (the project has no icon library). Each one is drawn on a 24 x 24 grid
- * with a 2 wide round stroke, the same look as the icons in ludo-mate-dialogs.html.
+ * Line icons drawn in code (the project has no icon library). Every icon is the same SVG path
+ * as in ludo-mate-dialogs.html, on a 24 x 24 grid with a 2 wide round stroke.
+ *
+ * Chevron, Book and Sliders are not in the HTML: they belong to the Game settings menu.
  */
 enum class LudoIcon {
     Close, Flag, Power, Gear, Exit, Pen, Eye, Redo, Bars, Chevron, Book, Sliders,
-    Star, Sound, Mute, Vibrate, VibrateOff,
-    Minus, Plus, Users, Crown
+    Star, Sound, Mute, Vibrate, Users, Crown, Dice, Next
 }
 
-private fun Path.line(x1: Float, y1: Float, x2: Float, y2: Float) {
-    moveTo(x1, y1)
-    lineTo(x2, y2)
+/**
+ * The path text of each icon. Arc flags are written with spaces ("0 1 0") so the path reader
+ * never has to guess where one number ends.
+ */
+private fun pathText(icon: LudoIcon): String = when (icon) {
+    LudoIcon.Close -> "M6 6l12 12M18 6L6 18"
+    LudoIcon.Flag -> "M5 21V4m0 1h11l-2 4 2 4H5"
+    LudoIcon.Power -> "M12 3v8M6.5 6.5a7 7 0 1 0 11 0"
+    LudoIcon.Gear ->
+        "M12 15a3 3 0 1 0 0 -6a3 3 0 0 0 0 6zM12 2v3M12 19v3M2 12h3M19 12h3" +
+            "M5 5l2 2M17 17l2 2M5 19l2 -2M17 7l2 -2"
+    LudoIcon.Exit -> "M10 4H5v16h5M16 8l4 4 -4 4M9 12h11"
+    LudoIcon.Pen -> "M4 20l1 -4L16 5l3 3L8 19zM14 7l3 3"
+    LudoIcon.Eye ->
+        "M2 12s4 -7 10 -7s10 7 10 7s-4 7 -10 7S2 12 2 12z" +
+            "M12 9a3 3 0 1 0 0 6a3 3 0 0 0 0 -6"
+    LudoIcon.Redo -> "M4 12a8 8 0 1 0 3 -6.2M4 4v4h4"
+    LudoIcon.Bars -> "M5 20V10M12 20V4M19 20v-7"
+    LudoIcon.Star -> "M12 3l2.8 5.8 6.2 0.9 -4.5 4.4 1 6.2 -5.5 -3 -5.5 3 1 -6.2L3 9.7l6.2 -0.9z"
+    LudoIcon.Sound ->
+        "M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"
+    LudoIcon.Mute -> "M4 9v6h4l5 4V5L8 9zM17 9l5 6M22 9l-5 6"
+    LudoIcon.Vibrate ->
+        "M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1 -1 1H8a1 1 0 0 1 -1 -1V4a1 1 0 0 1 1 -1zM11 18h2"
+    LudoIcon.Users ->
+        "M9 11a3 3 0 1 0 0 -6a3 3 0 0 0 0 6M3 19c0 -3 3 -5 6 -5s6 2 6 5" +
+            "M17 11a3 3 0 0 0 0 -6M18 14c2 0.5 3 2.5 3 5"
+    LudoIcon.Crown -> "M3 8l4 4 5 -7 5 7 4 -4 -2 11H5z"
+    LudoIcon.Dice ->
+        "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2H5a2 2 0 0 1 -2 -2V5a2 2 0 0 1 2 -2z" +
+            "M8 8h0.01M16 8h0.01M12 12h0.01M8 16h0.01M16 16h0.01"
+    LudoIcon.Next -> "M5 12h14M13 6l6 6 -6 6"
+    // Not in the HTML (Game settings menu only)
+    LudoIcon.Chevron -> "M9 6l6 6 -6 6"
+    LudoIcon.Book -> "M5 3H19V21H5zM9 3V21M12 8H16M12 12H16"
+    LudoIcon.Sliders ->
+        "M4 7h3M11 7h9M4 12h9M17 12h3M4 17h3M11 17h9" +
+            "M11 7a2 2 0 1 0 -4 0a2 2 0 1 0 4 0zM17 12a2 2 0 1 0 -4 0a2 2 0 1 0 4 0z" +
+            "M11 17a2 2 0 1 0 -4 0a2 2 0 1 0 4 0z"
 }
 
-/** Joined straight lines through the given x,y pairs. */
-private fun Path.poly(vararg p: Float, closed: Boolean = false) {
-    moveTo(p[0], p[1])
-    var i = 2
-    while (i + 1 < p.size) {
-        lineTo(p[i], p[i + 1])
-        i += 2
-    }
-    if (closed) close()
-}
-
-private fun Path.circle(cx: Float, cy: Float, r: Float) {
-    addOval(Rect(cx - r, cy - r, cx + r, cy + r))
-}
-
-private fun buildIconPath(icon: LudoIcon): Path {
-    val p = Path()
-    when (icon) {
-        LudoIcon.Close -> {
-            p.line(6f, 6f, 18f, 18f)
-            p.line(18f, 6f, 6f, 18f)
-        }
-        LudoIcon.Flag -> {
-            p.line(5f, 21f, 5f, 4f)
-            p.poly(5f, 5f, 16f, 5f, 14f, 9f, 16f, 13f, 5f, 13f)
-        }
-        LudoIcon.Power -> {
-            p.line(12f, 3f, 12f, 11f)
-            p.arcTo(Rect(5f, 3.83f, 19f, 17.83f), -141.8f, -256.4f, true)
-        }
-        LudoIcon.Gear -> {
-            p.circle(12f, 12f, 3f)
-            p.line(12f, 2f, 12f, 5f)
-            p.line(12f, 19f, 12f, 22f)
-            p.line(2f, 12f, 5f, 12f)
-            p.line(19f, 12f, 22f, 12f)
-            p.line(5f, 5f, 7f, 7f)
-            p.line(17f, 17f, 19f, 19f)
-            p.line(5f, 19f, 7f, 17f)
-            p.line(17f, 7f, 19f, 5f)
-        }
-        LudoIcon.Exit -> {
-            p.poly(10f, 4f, 5f, 4f, 5f, 20f, 10f, 20f)
-            p.poly(16f, 8f, 20f, 12f, 16f, 16f)
-            p.line(9f, 12f, 20f, 12f)
-        }
-        LudoIcon.Pen -> {
-            p.poly(4f, 20f, 5f, 16f, 16f, 5f, 19f, 8f, 8f, 19f, closed = true)
-            p.line(14f, 7f, 17f, 10f)
-        }
-        LudoIcon.Eye -> {
-            p.moveTo(2f, 12f)
-            p.cubicTo(2f, 12f, 6f, 5f, 12f, 5f)
-            p.cubicTo(18f, 5f, 22f, 12f, 22f, 12f)
-            p.cubicTo(22f, 12f, 18f, 19f, 12f, 19f)
-            p.cubicTo(6f, 19f, 2f, 12f, 2f, 12f)
-            p.close()
-            p.circle(12f, 12f, 3f)
-        }
-        LudoIcon.Redo -> {
-            p.arcTo(Rect(4f, 4f, 20f, 20f), 180f, -308.9f, true)
-            p.poly(4f, 4f, 4f, 8f, 8f, 8f)
-        }
-        LudoIcon.Bars -> {
-            p.line(5f, 20f, 5f, 10f)
-            p.line(12f, 20f, 12f, 4f)
-            p.line(19f, 20f, 19f, 13f)
-        }
-        LudoIcon.Chevron -> {
-            p.poly(9f, 6f, 15f, 12f, 9f, 18f)
-        }
-        LudoIcon.Book -> {
-            p.poly(5f, 3f, 19f, 3f, 19f, 21f, 5f, 21f, closed = true)
-            p.line(9f, 3f, 9f, 21f)
-            p.line(12f, 8f, 16f, 8f)
-            p.line(12f, 12f, 16f, 12f)
-        }
-        LudoIcon.Sliders -> {
-            p.line(4f, 7f, 7f, 7f)
-            p.line(11f, 7f, 20f, 7f)
-            p.circle(9f, 7f, 2f)
-            p.line(4f, 12f, 13f, 12f)
-            p.line(17f, 12f, 20f, 12f)
-            p.circle(15f, 12f, 2f)
-            p.line(4f, 17f, 7f, 17f)
-            p.line(11f, 17f, 20f, 17f)
-            p.circle(9f, 17f, 2f)
-        }
-        LudoIcon.Star -> {
-            // five-point star: 10 points, alternating outer and inner radius
-            for (i in 0 until 10) {
-                val r = if (i % 2 == 0) 10f else 4.4f
-                val a = Math.toRadians((-90.0 + i * 36.0))
-                val x = 12f + r * Math.cos(a).toFloat()
-                val y = 12.6f + r * Math.sin(a).toFloat()
-                if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
-            }
-            p.close()
-        }
-        LudoIcon.Sound -> {
-            p.poly(3f, 9f, 7f, 9f, 12f, 5f, 12f, 19f, 7f, 15f, 3f, 15f, closed = true)
-            p.arcTo(Rect(8f, 8f, 16f, 16f), -45f, 90f, true)
-            p.arcTo(Rect(5f, 5f, 19f, 19f), -45f, 90f, true)
-        }
-        LudoIcon.Mute -> {
-            p.poly(3f, 9f, 7f, 9f, 12f, 5f, 12f, 19f, 7f, 15f, 3f, 15f, closed = true)
-            p.line(16f, 9f, 21f, 15f)
-            p.line(21f, 9f, 16f, 15f)
-        }
-        LudoIcon.Vibrate -> {
-            p.poly(8f, 3f, 16f, 3f, 16f, 21f, 8f, 21f, closed = true)
-            p.line(4f, 8f, 4f, 16f)
-            p.line(20f, 8f, 20f, 16f)
-        }
-        LudoIcon.VibrateOff -> {
-            p.poly(8f, 3f, 16f, 3f, 16f, 21f, 8f, 21f, closed = true)
-            p.line(4f, 8f, 4f, 16f)
-            p.line(20f, 8f, 20f, 16f)
-            p.line(3f, 3f, 21f, 21f)
-        }
-        LudoIcon.Minus -> {
-            p.line(5f, 12f, 19f, 12f)
-        }
-        LudoIcon.Plus -> {
-            p.line(12f, 5f, 12f, 19f)
-            p.line(5f, 12f, 19f, 12f)
-        }
-        LudoIcon.Users -> {
-            p.circle(9f, 8f, 3.2f)
-            p.moveTo(3f, 20f)
-            p.cubicTo(3f, 15.5f, 5.5f, 13.5f, 9f, 13.5f)
-            p.cubicTo(12.5f, 13.5f, 15f, 15.5f, 15f, 20f)
-            p.circle(17f, 9f, 2.5f)
-            p.moveTo(17f, 13.8f)
-            p.cubicTo(19.5f, 13.8f, 21f, 15.5f, 21f, 18.5f)
-        }
-        LudoIcon.Crown -> {
-            p.poly(3f, 8f, 7.5f, 12.5f, 12f, 4.5f, 16.5f, 12.5f, 21f, 8f, 19f, 19f, 5f, 19f, closed = true)
-        }
-    }
-    return p
-}
+private fun buildIconPath(icon: LudoIcon): Path = PathParser().parsePathString(pathText(icon)).toPath()
 
 /** Draws [icon] in [tint]. Icons are decorative: put the contentDescription on the button around them. */
 @Composable

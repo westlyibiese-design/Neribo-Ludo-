@@ -1,8 +1,8 @@
 package com.westly.ludo.ui.dialogs
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -11,35 +11,43 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
+private val SlamEasing = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)
+
 /**
- * Result of a tournament round: ranking rows with "pieces home" dots, and a rotated OUT stamp
- * that slams onto the player who is out.
+ * Result of a tournament round (full-screen): the OUT stamp card for the player who is out, then
+ * a ranking with "pieces home" dots.
  *
  * [names] is indexed by seat (0..3, empty = not playing). [seeds] = pieces home per seat out of 4,
  * -1 = was not in this round. [outSeat] = the seat that is out.
+ * [nextLabel] is "Next round", or "Continue" when the person using the phone is the one who is out.
  * [autoAdvanceMillis] (for example when the person is only watching): calls [onNext] by itself.
- * Back and X are blocked: the only way on is the button ("Next round" or "Continue").
+ * Back is blocked: the only way on is the button.
  */
 @Composable
 fun GoldRoundResultDialog(
@@ -61,126 +69,143 @@ fun GoldRoundResultDialog(
     }
     fun seedsOf(seat: Int) = seeds.getOrElse(seat) { -1 }
     val seats = names.indices.filter { names[it].isNotEmpty() }
-    // In the round and still in first, then the player who is out, then players who were already out.
+    // In the round and still in first (most pieces home first), then the player who is out,
+    // then players who were already out.
     val ranked = seats.sortedWith(
         compareBy<Int>(
             { if (seedsOf(it) < 0) 2 else if (it == outSeat) 1 else 0 },
             { -seedsOf(it) }
         )
     )
-    val outName = names.getOrElse(outSeat) { "" }
+    val outName = names.getOrElse(outSeat) { "" }.ifEmpty { SeatColors.name(outSeat) }
 
-    GoldDialog(
-        title = "Round $round result",
-        lead = if (outName.isNotEmpty()) "$outName (${SeatColors.name(outSeat)}) is out." else null,
-        badgeIcon = LudoIcon.Bars,
-        badgeTone = ChunkyTones.Gold,
-        onClose = {},
-        showClose = false,
-        modifier = modifier
+    FullScreenGold(
+        onBack = null,
+        header = {
+            BasicText(
+                "Round $round result",
+                style = bodyStyle(16.sp, FontWeight.Bold, GoldTheme.Muted, TextAlign.Center)
+            )
+        },
+        footer = {
+            ChunkyButton(nextLabel, onNext, tone = ChunkyTones.Green, icon = LudoIcon.Next, enabled = nextEnabled)
+        }
     ) {
+        OutStampCard(outSeat = outSeat, outName = outName, modifier = modifier)
+
         InfoPanel {
             ranked.forEachIndexed { index, seat ->
-                ResultRow(
-                    rank = index + 1,
-                    seat = seat,
-                    name = names[seat],
-                    seeds = seedsOf(seat),
-                    isOut = seat == outSeat,
-                    topDivider = index > 0
+                val wasIn = seedsOf(seat) >= 0
+                val isOut = seat == outSeat || !wasIn
+                InfoRow(
+                    title = names[seat],
+                    subtitle = if (wasIn) "${seedsOf(seat)} of 4 pieces home" else null,
+                    leading = { SeatAvatar(seat, names[seat], avatarSize = 34.dp) },
+                    tag = {
+                        if (isOut) StatusTag("Out", TagKind.Bad) else HomeDots(seedsOf(seat))
+                    },
+                    dimmed = isOut,
+                    topDivider = index > 0,
+                    verticalPadding = 10.dp
                 )
             }
-        }
-        DialogButtons {
-            ChunkyButton(nextLabel, onNext, tone = ChunkyTones.Green, enabled = nextEnabled)
         }
     }
 }
 
+/** The gold card with the grey-ringed avatar, the slamming OUT badge, the name and the reason. */
 @Composable
-private fun ResultRow(rank: Int, seat: Int, name: String, seeds: Int, isOut: Boolean, topDivider: Boolean) {
-    val wasIn = seeds >= 0
-    Column(Modifier.fillMaxWidth()) {
-        if (topDivider) {
-            Box(Modifier.fillMaxWidth().height(1.dp).background(GoldTheme.Line))
-        }
-        Row(
-            Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+private fun OutStampCard(outSeat: Int, outName: String, modifier: Modifier) {
+    val shortScreen = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp <= 640
+    Box(modifier.fillMaxWidth().goldFrame()) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(
+                    start = 20.dp,
+                    end = 20.dp,
+                    top = if (shortScreen) 20.dp else 30.dp,
+                    bottom = if (shortScreen) 20.dp else 24.dp
+                ),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Box(Modifier.alpha(if (wasIn) 1f else 0.4f)) { SeatAvatar(seat, name) }
-            Column(Modifier.weight(1f).alpha(if (wasIn) 1f else 0.4f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                BasicText(
-                    "$rank. $name",
-                    style = bodyStyle(
-                        16.sp, FontWeight.Bold,
-                        if (isOut) GoldTheme.ErrorText else GoldTheme.Cream
-                    ),
-                    maxLines = 2
+            SeatAvatar(outSeat, outName, avatarSize = 96.dp, grayscale = 0.35f, stamp = true)
+            BasicText(
+                "$outName is out",
+                modifier = Modifier.semantics { heading() },
+                style = displayStyle(
+                    27.sp, GoldTheme.Cream, TextAlign.Center,
+                    lineHeight = 29.7.sp, letterSpacing = (-0.27).sp
                 )
-                if (wasIn) {
-                    HomeDots(seeds)
-                }
-            }
-            when {
-                isOut -> OutStamp()
-                wasIn -> StatusTag("$seeds/4", TagKind.Neutral)
-                else -> StatusTag("Out", TagKind.Bad)
-            }
+            )
+            BasicText(
+                "${SeatColors.name(outSeat)} lost the tie-break and leaves the tournament.",
+                modifier = Modifier.widthIn(max = 326.dp),
+                style = bodyStyle(16.sp, FontWeight.Medium, GoldTheme.Muted, TextAlign.Center)
+            )
         }
+        OutBadge(Modifier.align(Alignment.TopEnd).padding(top = 20.dp, end = 16.dp))
     }
 }
 
-/** Four little dots: gold = a piece that is home. */
+/** Four 10dp dots: cream = a piece that is home, ring only = not home yet. */
 @Composable
 private fun HomeDots(home: Int) {
     Row(
         Modifier.semantics { contentDescription = "$home of 4 pieces home" },
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         for (i in 0 until 4) {
             Box(
                 Modifier
-                    .size(12.dp)
-                    .background(if (i < home) GoldTheme.Gold else GoldTheme.Line, CircleShape)
+                    .size(10.dp)
+                    .then(
+                        if (i < home) Modifier.background(GoldTheme.Cream, CircleShape)
+                        else Modifier.border(1.5.dp, GoldTheme.Muted, CircleShape)
+                    )
             )
         }
     }
 }
 
-/** Rotated red "OUT" stamp. It starts big and see-through and slams down with a small bounce. */
+/**
+ * White "OUT" on red, tilted 9 degrees. After a 250ms wait it starts big and see-through, lands
+ * at 60% (slightly small, fully visible) and settles at normal size by 550ms.
+ */
 @Composable
-private fun OutStamp() {
+private fun OutBadge(modifier: Modifier) {
     val motion = LocalMotionEnabled.current
-    val scale = remember { Animatable(if (motion) 2.6f else 1f) }
-    val fade = remember { Animatable(if (motion) 0f else 1f) }
+    var t by remember { mutableFloatStateOf(if (motion) 0f else 1f) }
     LaunchedEffect(Unit) {
         if (motion) {
-            delay(350)
-            fade.animateTo(1f, tween(90))
+            delay(250)
+            val clock = Animatable(0f)
+            clock.animateTo(1f, tween(550, easing = LinearEasing)) { t = value }
         }
     }
-    LaunchedEffect(Unit) {
-        if (motion) {
-            delay(350)
-            scale.animateTo(1f, spring(dampingRatio = 0.45f, stiffness = Spring.StiffnessMedium))
-        }
-    }
-    val shape = RoundedCornerShape(8.dp)
+    // keyframes: 0% (opacity 0, rotate -14, scale 2.6) -> 60% (opacity 1, rotate 9, scale .94) -> 100% (scale 1)
+    val first = t < 0.6f
+    val local = if (first) SlamEasing.transform(t / 0.6f) else SlamEasing.transform((t - 0.6f) / 0.4f)
+    val scaleNow = if (first) 2.6f + (0.94f - 2.6f) * local else 0.94f + (1f - 0.94f) * local
+    val rotationNow = if (first) -14f + (9f - -14f) * local else 9f
+    val alphaNow = if (first) local else 1f
+    val shape = RoundedCornerShape(10.dp)
     BasicText(
         "OUT",
-        modifier = Modifier
+        modifier = modifier
             .graphicsLayer {
-                rotationZ = -10f
-                scaleX = scale.value
-                scaleY = scale.value
-                alpha = fade.value
+                rotationZ = rotationNow
+                scaleX = scaleNow
+                scaleY = scaleNow
+                alpha = alphaNow
             }
-            .border(2.5.dp, GoldTheme.TagBad, shape)
-            .padding(horizontal = 10.dp, vertical = 2.dp)
+            .shadow(8.dp, shape, clip = false)
+            .background(GoldTheme.TagBad, shape)
+            .border(3.dp, Color.White, shape)
+            .padding(horizontal = 16.dp, vertical = 2.dp)
             .semantics { contentDescription = "Out" },
-        style = displayStyle(22.sp, GoldTheme.TagBad),
+        style = displayStyle(30.sp, Color.White),
         maxLines = 1
     )
 }

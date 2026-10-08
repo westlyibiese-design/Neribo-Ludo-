@@ -18,7 +18,7 @@ fun GoldSignInDialog(
         title = "Sign in",
         lead = "Sign in with Google to play online with friends.",
         badgeIcon = LudoIcon.Star,
-        badgeTone = ChunkyTones.Gold,
+        badgeTone = ChunkyTones.Yellow,
         onClose = onCancel,
         modifier = modifier
     ) {
@@ -29,7 +29,7 @@ fun GoldSignInDialog(
                 tone = ChunkyTones.White,
                 leading = { GoogleMark() }
             )
-            GhostButton("Cancel", onCancel)
+            ChunkyButton("Cancel", onCancel, tone = ChunkyTones.Navy)
         }
     }
 }
