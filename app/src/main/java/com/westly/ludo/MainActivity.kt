@@ -105,6 +105,23 @@ import com.westly.ludo.ui.SkipButton
 import com.westly.ludo.ui.SoundVibrationScreen
 import com.westly.ludo.ui.TieBreakDialog
 import com.westly.ludo.ui.YoureOutDialog
+import com.westly.ludo.ui.dialogs.EndScope
+import com.westly.ludo.ui.dialogs.GoldAccountDialog
+import com.westly.ludo.ui.dialogs.GoldChangeNamesDialog
+import com.westly.ludo.ui.dialogs.GoldConfigHost
+import com.westly.ludo.ui.dialogs.GoldEndDialog
+import com.westly.ludo.ui.dialogs.GoldExitDialog
+import com.westly.ludo.ui.dialogs.GoldFamilyHost
+import com.westly.ludo.ui.dialogs.GoldPlayerNamesDialog
+import com.westly.ludo.ui.dialogs.GoldResignDialog
+import com.westly.ludo.ui.dialogs.GoldRoundResultDialog
+import com.westly.ludo.ui.dialogs.GoldSettingsHost
+import com.westly.ludo.ui.dialogs.GoldSignInPanel
+import com.westly.ludo.ui.dialogs.GoldSoundHost
+import com.westly.ludo.ui.dialogs.GoldTieBreakDialog
+import com.westly.ludo.ui.dialogs.GoldWinnerDialog
+import com.westly.ludo.ui.dialogs.GoldYoureOutDialog
+import com.westly.ludo.ui.dialogs.ResignMode
 import com.westly.ludo.ui.WinnerPage
 import com.westly.ludo.ui.LudoBoard
 import com.westly.ludo.ui.NeriboIntro
@@ -349,16 +366,16 @@ fun LudoApp(
                         }
                     }
                 )
-                "settings" -> SettingsScreen(
+                "settings" -> GoldSettingsHost(
                     names,
                     onSound = { screen = "sound" },
                     onRules = { screen = "rules" },
                     onConfiguration = { screen = "config" },
                     onClose = { screen = "home" }
                 )
-                "sound" -> SoundVibrationScreen(settings, onClose = { screen = "settings" })
+                "sound" -> GoldSoundHost(settings, onClose = { screen = "settings" })
                 "rules" -> RulesScreen(onClose = { screen = "settings" })
-                "config" -> ConfigurationScreen(settings, onClose = { screen = "settings" })
+                "config" -> GoldConfigHost(settings, onClose = { screen = "settings" })
                 "modes" -> GameModeScreen(
                     onBack = { screen = "home" },
                     onYouAndComputer = { screen = "game" },
@@ -467,18 +484,19 @@ fun LudoApp(
                         connect = connect
                     )
                 }
-                "family_count" -> FamilyCountScreen(
+                "family_count" -> GoldFamilyHost(
                     onBack = { screen = "modes" },
-                    onPick = { count ->
-                        familyCount = count
-                        screen = "family_names"
+                    onStart = { list ->
+                        familyCount = list.size
+                        onFamilyCreate(list.size, list)
+                        screen = "family"
                     }
                 )
-                "family_names" -> FamilyNamesScreen(
-                    count = familyCount,
-                    onBack = { screen = "family_count" },
+                "family_names" -> GoldFamilyHost(
+                    onBack = { screen = "modes" },
                     onStart = { list ->
-                        onFamilyCreate(familyCount, list)
+                        familyCount = list.size
+                        onFamilyCreate(list.size, list)
                         screen = "family"
                     }
                 )
@@ -502,7 +520,7 @@ fun LudoApp(
             NeriboFooter(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 4.dp))
         }
         if (showSignIn) {
-            SignInPanel(
+            GoldSignInPanel(
                 online,
                 onSuccess = {
                     showSignIn = false
@@ -517,8 +535,8 @@ fun LudoApp(
         }
         val account = online.user
         if (showAccount && account != null) {
-            AccountDialog(
-                account,
+            GoldAccountDialog(
+                account.name,
                 onSignOut = {
                     showAccount = false
                     scope.launch { online.signOut() }
@@ -896,33 +914,40 @@ fun LudoScreen(
             resignLabel = if (game.family) endLabel else "Resign"
         )
         "resign" -> if (game.family) {
-            ResignDialog(
-                title = endLabel,
-                message = "Are you sure? Scores will be cleared.",
-                onConfirm = {
+            GoldEndDialog(
+                scope = if (tournament) EndScope.Tournament else EndScope.Game,
+                round = game.round,
+                onKeepPlaying = { dialog = "menu" },
+                onEnd = {
                     dialog = "none"
                     onEndFamily()
-                },
-                onCancel = { dialog = "menu" }
+                }
             )
         } else {
-            ResignDialog(
-                message = if (tournament && game.activeCount() > 2) {
-                    "You will be knocked out of the tournament. Do you want to resign?"
-                } else {
-                    "A point will be awarded to ${names[game.resignBeneficiary(0)]}. Do you want to resign?"
-                },
-                onConfirm = {
+            val toSeat = game.resignBeneficiary(0)
+            GoldResignDialog(
+                mode = if (tournament && game.activeCount() > 2) ResignMode.Tournament
+                else if (tournament) ResignMode.Final else ResignMode.Quick,
+                myName = names[0],
+                opponentName = names[toSeat],
+                mySeat = 0,
+                opponentSeat = toSeat,
+                onKeepPlaying = { dialog = "menu" },
+                onResign = {
                     dialog = "none"
                     scope.launch { game.resign(0) }
-                },
-                onCancel = { dialog = "menu" }
+                }
             )
         }
         "names" -> if (game.family) {
-            FamilyNamesDialog(game, onClose = { dialog = "none" })
+            GoldChangeNamesDialog(
+                currentNames = List(game.familyPlayers) { game.familyName(it) },
+                defaultNames = List(game.familyPlayers) { "Player ${it + 1}" },
+                onSave = { game.setFamilyNames(it) },
+                onClose = { dialog = "none" }
+            )
         } else {
-            ChangeNamesDialog(names, onClose = { dialog = "none" })
+            GoldPlayerNamesDialog(names, onClose = { dialog = "none" })
         }
     }
 
@@ -930,22 +955,27 @@ fun LudoScreen(
         val colorNames = listOf("Red", "Green", "Yellow", "Blue")
         when (game.overlay) {
             TOverlay.TIEBREAK -> {
-                TieBreakDialog(
+                val roundSeats = nameList.indices.filter { nameList[it].isNotEmpty() && game.active.getOrElse(it) { false } }
+                val rollsNow = game.tieRolls.toList()
+                val waiting = game.tieIds.any { rollsNow.getOrElse(it) { 0 } == 0 }
+                // Family: every tied person is a human and taps their own dice in turn.
+                // Connect: the same, but each person taps on their own phone, so only the one whose turn it is can.
+                val humanCanRoll = if (cs != null) game.tieTurn >= 0 && game.tieTurn == cs.myPlayer
+                else if (game.family) game.tieTurn >= 0
+                else 0 in game.tieIds && game.tieRolls[0] == 0 && game.tieRolling < 0
+                val tapPlayer = if (cs != null || game.family) game.tieTurn else 0
+                val tapMessage = if (cs != null && game.tieTurn >= 0) "Tap your dice to roll"
+                else if (game.family && game.tieTurn >= 0) "${nm(game.tieTurn)}, tap your dice to roll" else null
+                val waitMessage = if (cs != null && game.tieTurn >= 0) "Waiting for ${nm(game.tieTurn)}..." else null
+                GoldTieBreakDialog(
                     names = nameList,
+                    players = roundSeats,
                     tied = game.tieIds,
-                    rolls = game.tieRolls.toList(),
-                    rolling = game.tieRolling,
-                    flicker = game.tieFlicker,
-                    // Family: every tied person is a human and taps their own dice in turn.
-                    // Connect: the same, but each person taps on their own phone, so only the one whose turn it is can.
-                    humanCanRoll = if (cs != null) game.tieTurn >= 0 && game.tieTurn == cs.myPlayer
-                    else if (game.family) game.tieTurn >= 0
-                    else 0 in game.tieIds && game.tieRolls[0] == 0 && game.tieRolling < 0,
+                    rolls = rollsNow,
+                    rollingSeat = game.tieRolling,
+                    canRollSeat = if (humanCanRoll) tapPlayer else -1,
                     onRoll = { if (cs != null) cs.tapTie() else scope.launch { game.tieHumanRoll() } },
-                    tapPlayer = if (cs != null || game.family) game.tieTurn else 0,
-                    tapMessage = if (cs != null && game.tieTurn >= 0) "Tap your dice to roll"
-                    else if (game.family && game.tieTurn >= 0) "${nm(game.tieTurn)}, tap your dice to roll" else null,
-                    waitMessage = if (cs != null && game.tieTurn >= 0) "Waiting for ${nm(game.tieTurn)}..." else null
+                    message = if (waiting) (if (humanCanRoll) tapMessage else waitMessage) else null
                 )
                 // The roll-off runs while this screen is open; leaving the screen stops it safely.
                 // A Connect guest never runs it: only the host decides the roll-off.
@@ -953,27 +983,26 @@ fun LudoScreen(
                     LaunchedEffect(Unit) { game.runTieBreak() }
                 }
             }
-            TOverlay.RESULT -> RoundResultDialog(
-                title = "Round ${game.round} Result",
-                outLine = "${nm(game.resultOut)} (${colorNames.getOrElse(game.resultOut) { "" }}) is OUT",
+            TOverlay.RESULT -> GoldRoundResultDialog(
+                round = game.round,
+                outSeat = game.resultOut,
                 names = nameList,
                 seeds = game.resultSeeds,
-                outPlayer = game.resultOut,
-                auto = game.spectator,
-                fast = game.fast,
                 onNext = { if (cs != null) cs.tapNextRound() else game.resultNext() },
                 // Connect: only the host moves on; a guest sees who it is waiting for.
                 nextEnabled = cs == null || cs.isHost,
-                nextLabel = if (cs == null || cs.isHost) "Next Round" else "Waiting for ${cs.hostName}..."
+                nextLabel = if (cs == null || cs.isHost) "Next round" else "Waiting for ${cs.hostName}...",
+                autoAdvanceMillis = if (game.spectator) (if (game.fast) 300L else 2500L) else null
             )
             // Connect has no "You're out" screen: a knocked-out person keeps watching the game.
             TOverlay.OUT -> if (cs == null) {
                 val to = if (game.leaveTo in 0..3) game.leaveTo else 1
-                YoureOutDialog(
-                    message = (if (game.resultResigned) "You resigned.\n" else "You are out of the tournament.\n") +
-                        "Watch the rest, or leave now.\nIf you leave, ${names[to]} gets the point.",
+                GoldYoureOutDialog(
+                    resigned = game.resultResigned,
+                    opponentName = names[to],
                     onWatch = { game.outWatch() },
-                    onLeave = { game.outLeave() }
+                    onLeave = { game.outLeave() },
+                    opponentSeat = to
                 )
             }
         }
@@ -983,32 +1012,40 @@ fun LudoScreen(
         if (cs != null) {
             // Connect: names and scores follow the people (by seat), because colours change every game.
             val seats = (0 until cs.playerCount).toList()
-            WinnerPage(
-                winnerName = nm(game.winner.coerceAtLeast(0)),
-                names = seats.map { cs.seatName(it) },
-                scores = seats.map { cs.scoreOfSeat(it) },
-                tournament = tournament,
-                onNext = { cs.tapNextGame() },
-                onModes = { exitAction() },
+            val winSeat = game.winner.coerceAtLeast(0)
+            val seatScore = cs.scoreOfSeat(seats.firstOrNull { cs.seatName(it) == nm(winSeat) } ?: 0)
+            GoldWinnerDialog(
+                winnerName = nm(winSeat),
+                winnerSeat = winSeat,
+                onPlayAgain = { cs.tapNextGame() },
+                onMenu = { exitAction() },
+                eyebrow = null,
+                subtitle = "Well played, everyone!",
+                scoreLine = "Score: $seatScore",
                 // A game with a removed person cannot go on: the host ends it from the menu.
-                nextEnabled = cs.isHost && !cs.hasRemoved,
+                playAgainEnabled = cs.isHost && !cs.hasRemoved,
                 waitingText = if (!cs.isHost) "Waiting for ${cs.hostName}..."
                 else if (cs.hasRemoved) "Someone left: end the game" else null
             )
         } else {
-            WinnerPage(
-                winnerName = nm(game.winner.coerceAtLeast(0)),
-                names = nameList,
-                scores = game.scores.toList().let { sc ->
-                    List(if (game.family) game.familyPlayers else PlayerNames.COUNT) { sc.getOrElse(it) { 0 } }
-                },
-                tournament = tournament,
-                youWon = if (game.family) null else game.winner == 0,
-                onNext = { game.nextGame() },
-                onModes = {
+            val winSeat = game.winner.coerceAtLeast(0)
+            val youWon = if (game.family) null else game.winner == 0
+            val winScore = game.scores.toList().getOrElse(winSeat) { 0 }
+            GoldWinnerDialog(
+                winnerName = nm(winSeat),
+                winnerSeat = winSeat,
+                onPlayAgain = { game.nextGame() },
+                onMenu = {
                     game.nextGame()
                     onModes()
-                }
+                },
+                eyebrow = if (youWon == true) "You are the" else null,
+                subtitle = when (youWon) {
+                    true -> "You conquered the board."
+                    false -> "Better luck next time!"
+                    null -> "Well played, everyone!"
+                },
+                scoreLine = if (youWon == true) "You played like a legend!" else "Score: $winScore"
             )
         }
     }
@@ -1055,17 +1092,23 @@ fun LudoScreen(
                 secondaryLabel = "Stay", onSecondary = { dialog = "none" },
                 primarySwatch = Palette.Red
             )
-            "connectEnd", "connectHostExit" -> ResignDialog(
-                title = if (dialog == "connectEnd") endLabel else "Exit",
-                message = if (dialog == "connectEnd") "Are you sure? Scores will be cleared."
-                else "The game ends for everyone. Exit?",
-                onConfirm = {
+            "connectEnd" -> GoldEndDialog(
+                scope = if (tournament) EndScope.Tournament else EndScope.Game,
+                round = game.round,
+                onKeepPlaying = { dialog = "connectMenu" },
+                onEnd = {
                     dialog = "none"
                     // Tells every phone the game ended and clears the saved game. The host then sees the
                     // same "Game ended" panel and leaves with OK.
                     cs.endForEveryone()
-                },
-                onCancel = { dialog = if (dialog == "connectEnd") "connectMenu" else "none" }
+                }
+            )
+            "connectHostExit" -> GoldExitDialog(
+                onKeepPlaying = { dialog = "none" },
+                onExit = {
+                    dialog = "none"
+                    cs.endForEveryone()
+                }
             )
         }
 
