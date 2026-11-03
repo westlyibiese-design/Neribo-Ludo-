@@ -91,6 +91,11 @@ interface LiveSession {
     /** A tap on the board: the dice area rolls, a tap while choosing is a move. */
     fun tapBoard(row: Float, col: Float)
 
+    /** Roll the dice with a hidden helper (1..3, see CheatPad). The default is a normal roll. */
+    fun tapRollCheat(cheat: Int) {
+        tapBoard(7f, 7f)
+    }
+
     /** A tap on a pawn in the pick pop-up. */
     fun tapPiece(tag: Any?)
 

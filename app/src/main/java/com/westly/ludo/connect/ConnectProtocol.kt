@@ -207,6 +207,13 @@ object ConnectProtocol {
     /** Guest -> host: a tap, to be checked and carried out by the host. */
     fun intent(kind: String): JSONObject = base(T_INTENT).put("kind", kind)
 
+    /** A roll. [cheat] 1..3 asks the host for a hidden helper roll; anything else is a normal roll. */
+    fun intentRoll(cheat: Int): JSONObject {
+        val m = intent(K_ROLL)
+        if (cheat in 1..3) m.put("cheat", cheat)
+        return m
+    }
+
     fun intentSelectDie(i: Int): JSONObject = intent(K_SELECT_DIE).put("i", i)
 
     fun intentBoardTap(row: Float, col: Float): JSONObject =

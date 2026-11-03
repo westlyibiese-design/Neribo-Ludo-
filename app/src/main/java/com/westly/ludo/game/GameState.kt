@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.runtime.withFrameNanos
 import com.westly.ludo.ui.Palette
 import com.westly.ludo.ui.PiecePick
@@ -1073,6 +1074,7 @@ class LudoGame(
         activePlayer = if (tournament) firstActive() else 0
         winner = -1
         bonusRoll = false
+        cheatSixPlayer = -1
         die1 = 0
         die2 = 0
         used1 = false
@@ -1390,11 +1392,15 @@ class LudoGame(
         }
     }
 
-    suspend fun roll() {
+    suspend fun roll(cheat: Int = 0) {
         if (phase != Phase.AwaitRoll) return
         phase = Phase.Rolling
-        val a = Random.nextInt(1, 7)
-        val b = Random.nextInt(1, 7)
+        // Hidden helper (see CheatPad). Only a human turn can use it: never Family, never a computer.
+        // Without a cheat (or when none is allowed or possible) the dice are random exactly as before.
+        val fixed: Pair<Int, Int>? = if (cheatAllowed(cheat)) cheatDice(cheat) else null
+        cheatSixPlayer = if (fixed != null && cheat == CheatKind.SIX) activePlayer else -1
+        val a = fixed?.first ?: Random.nextInt(1, 7)
+        val b = fixed?.second ?: Random.nextInt(1, 7)
         visualSink?.invoke(VisualEvent.Roll(activePlayer, a, b))
         playRollVisual(a, b)
         die1 = a
@@ -1404,6 +1410,75 @@ class LudoGame(
         selectedDie = -1
         movedThisRoll = false
         afterDiceChange()
+    }
+
+    // ------------------------------------------------------------------
+    // Hidden dice helper (three secret codes, see CheatPad). It only chooses WHICH two numbers the
+    // dice land on; every rule, move and capture afterwards is the normal game. It never runs in
+    // Family (one shared phone) and never for a computer. Nothing here is saved.
+    // ------------------------------------------------------------------
+
+    /** The player whose last roll was a helper double six, or -1. That player's next roll cannot be one. */
+    private var cheatSixPlayer = -1
+
+    private fun cheatAllowed(cheat: Int): Boolean {
+        if (cheat < CheatKind.SIX || cheat > CheatKind.HOME) return false
+        if (family || isComputerTurn) return false
+        if (cheat == CheatKind.SIX && cheatSixPlayer == activePlayer) return false
+        return true
+    }
+
+    /**
+     * True when the helper [cheat] can be used by the player whose turn it is, right now: the
+     * dice are waiting, it is allowed, and (for kill / home) a dice pair that does it really exists.
+     */
+    fun cheatReady(cheat: Int): Boolean =
+        phase == Phase.AwaitRoll && cheatAllowed(cheat) && cheatDice(cheat) != null
+
+    /** The two numbers for helper [cheat], or null when there is none (the roll is then random). */
+    private fun cheatDice(cheat: Int): Pair<Int, Int>? {
+        if (cheat == CheatKind.SIX) return 6 to 6
+        // Try all 36 pairs inside a throw-away snapshot: every value changed in there is
+        // discarded afterwards, so the real game (and the screen) never sees the trial dice.
+        val snap = Snapshot.takeMutableSnapshot()
+        val found: List<Pair<Int, Int>> = try {
+            snap.enter {
+                phase = Phase.Choose
+                used1 = false
+                used2 = false
+                var best = -1
+                val pairs = ArrayList<Pair<Int, Int>>()
+                for (x in 1..6) {
+                    for (y in 1..6) {
+                        die1 = x
+                        die2 = y
+                        var score = -1
+                        for (m in legalMoves()) {
+                            val s = if (cheat == CheatKind.KILL) {
+                                // The most advanced opponent seed on the cell where the move really ends.
+                                val victims = victimsAfter(m)
+                                if (victims.isEmpty()) -1 else victims.maxOf { it.progress } + 1
+                            } else {
+                                if (targetOf(m) == Route.CENTER) 1 else -1
+                            }
+                            if (s > score) score = s
+                        }
+                        if (score < 0) continue
+                        if (score > best) {
+                            best = score
+                            pairs.clear()
+                        }
+                        if (score == best) pairs.add(x to y)
+                    }
+                }
+                pairs
+            }
+        } catch (e: Exception) {
+            emptyList()
+        } finally {
+            snap.dispose()
+        }
+        return if (found.isEmpty()) null else found.random()
     }
 
     /** The dice flicker, then land on [a] and [b]. Visual only. */

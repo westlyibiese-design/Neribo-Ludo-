@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import com.westly.ludo.connect.ConnectSession
 import com.westly.ludo.connect.LinkState
 import com.westly.ludo.connect.LiveSession
+import com.westly.ludo.game.CheatPad
 import com.westly.ludo.game.LudoColor
 import com.westly.ludo.game.LudoGame
 import com.westly.ludo.game.GameSettings
@@ -640,6 +641,23 @@ fun LudoScreen(
 
     // Which pop-up is open: "none", "menu", "resign" or "names". Computers wait while one is open.
     var dialog by remember { mutableStateOf("none") }
+
+    // Hidden dice helper: secret taps on the seed circles, then golden dice (see CheatPad).
+    // It listens only on this person's own turn, waiting to roll, and never in Family (one shared phone).
+    val cheatPad = remember(game) { CheatPad() }
+    val cheatOn: () -> Boolean = {
+        !game.family && !game.bannerPending && game.overlay == TOverlay.NONE &&
+            game.phase == Phase.AwaitRoll && dialog == "none" &&
+            (if (cs != null) (cs.myPlayer >= 0 && cs.canAct()) else (!game.isComputerTurn && game.activePlayer == 0))
+    }
+    val cheatActive = cheatOn()
+    LaunchedEffect(cheatActive) { if (!cheatActive) cheatPad.clear() }
+    LaunchedEffect(cheatPad.gold) {
+        if (cheatPad.gold != 0) {
+            delay(5000)   // the golden dice wait 5 seconds
+            cheatPad.clear()
+        }
+    }
     // Leaving a Connect and Play game: the host ends it for everybody (after asking), a guest just leaves.
     val exitAction: () -> Unit = {
         if (cs == null) {
@@ -777,13 +795,25 @@ fun LudoScreen(
                     pieces = { game.pieceViews() },
                     pulse = { pulse.floatValue },
                     rollHint = game.phase == Phase.AwaitRoll,
+                    goldDice = cheatPad.gold != 0,
                     pick = game.pick,
                     onPick = { tag ->
                         if (cs != null) cs.tapPiece(tag)
                         else if (!game.isComputerTurn) scope.launch { game.onPiecePicked(tag) }
                     },
                     onBoardTap = { row, col ->
-                        if (cs != null) cs.tapBoard(row, col)
+                        val helperOn = cheatOn()
+                        val kind = if (helperOn && row in 6f..9f && col in 6f..9f) {
+                            cheatPad.takeForRoll()
+                        } else {
+                            cheatPad.listen(row, col, helperOn) { k -> game.cheatReady(k) }
+                            0
+                        }
+                        if (kind != 0) {
+                            // The golden dice were tapped in time: roll with the helper (the host checks it again).
+                            if (cs != null) cs.tapRollCheat(kind)
+                            else if (!game.isComputerTurn && !game.bannerPending) scope.launch { game.roll(kind) }
+                        } else if (cs != null) cs.tapBoard(row, col)
                         else if (!game.isComputerTurn && !game.bannerPending) scope.launch { game.onBoardTap(row, col) }
                     },
                     yardLabels = if (tournament) listOf(nm(1), nm(2), nm(0), nm(3))

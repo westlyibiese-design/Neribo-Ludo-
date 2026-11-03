@@ -862,7 +862,9 @@ class OnlineSession(
         val row: Float = 0f,
         val col: Float = 0f,
         val color: String = "",
-        val slot: Int = 0
+        val slot: Int = 0,
+        /** A roll only: the hidden helper (1..3) the person asked for, 0 = a normal roll. */
+        val cheat: Int = 0
     )
 
     /** The screen that runs the game gives its coroutine scope (see [uiScope]). */
@@ -1076,6 +1078,12 @@ class OnlineSession(
     private fun tapRoll() {
         if (!canAct() || game?.phase != Phase.AwaitRoll) return
         act(HostIntent(mySeat, ConnectProtocol.K_ROLL), ConnectProtocol.intent(ConnectProtocol.K_ROLL))
+    }
+
+    /** A roll with a hidden helper (see CheatPad). The host checks it again before the dice are thrown. */
+    override fun tapRollCheat(cheat: Int) {
+        if (!canAct() || game?.phase != Phase.AwaitRoll) return
+        act(HostIntent(mySeat, ConnectProtocol.K_ROLL, cheat = cheat), ConnectProtocol.intentRoll(cheat))
     }
 
     override fun tapDie(i: Int) {
@@ -1667,7 +1675,7 @@ class OnlineSession(
         if (member.role == OnlineRole.WATCHER) return
         if (removedInfo.containsKey(seat)) return
         val intent = when (msg.optString("kind", "")) {
-            ConnectProtocol.K_ROLL -> HostIntent(seat, ConnectProtocol.K_ROLL)
+            ConnectProtocol.K_ROLL -> HostIntent(seat, ConnectProtocol.K_ROLL, cheat = msg.optInt("cheat", 0).coerceIn(0, 3))
             ConnectProtocol.K_TIE_ROLL -> HostIntent(seat, ConnectProtocol.K_TIE_ROLL)
             ConnectProtocol.K_NEXT_ROUND -> HostIntent(seat, ConnectProtocol.K_NEXT_ROUND)
             ConnectProtocol.K_NEXT_GAME -> HostIntent(seat, ConnectProtocol.K_NEXT_GAME)
@@ -1734,7 +1742,7 @@ class OnlineSession(
             ConnectProtocol.K_ROLL ->
                 if (myTurn && g.phase == Phase.AwaitRoll) {
                     announceHand(req.seat, player, HandTarget.Dice, g.firstColorOf(player))
-                    g.roll()
+                    g.roll(req.cheat)
                 }
             ConnectProtocol.K_SELECT_DIE ->
                 if (myTurn && g.phase == Phase.Choose && req.i in 0..2) {

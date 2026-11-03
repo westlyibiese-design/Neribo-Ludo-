@@ -85,6 +85,8 @@ fun LudoBoard(
     pieces: (() -> List<PieceView>)? = null,
     pulse: () -> Float = { 0f },
     rollHint: Boolean = false,
+    /** Golden glow on the dice (a hidden helper is armed on this phone only). */
+    goldDice: Boolean = false,
     pick: PiecePick? = null,
     onPick: (Any?) -> Unit = {},
     onBoardTap: ((row: Float, col: Float) -> Unit)? = null,
@@ -118,7 +120,7 @@ fun LudoBoard(
             }
             if (pieces != null) {
                 Canvas(Modifier.fillMaxSize()) {
-                    drawPieceLayer(pieces(), pulse(), rollHint)
+                    drawPieceLayer(pieces(), pulse(), rollHint, goldDice)
                 }
             }
             if (pick != null) PiecePickPopup(pick, side, onPick)
@@ -552,8 +554,37 @@ private fun DrawScope.drawArrow(center: Offset, dir: Offset, c: Float, both: Boo
 }
 
 /** Live pieces, drawn above the static board. */
-private fun DrawScope.drawPieceLayer(pieces: List<PieceView>, pulse: Float, rollHint: Boolean) {
+private fun DrawScope.drawPieceLayer(pieces: List<PieceView>, pulse: Float, rollHint: Boolean, goldDice: Boolean) {
     val m = boardMetrics(size.minDimension)
+
+    if (goldDice) {
+        // Golden dice: a warm gold wash and a glowing gold frame over the dice area.
+        val topLeft = Offset(m.x(6.04f), m.y(6.76f))
+        val box = Size(m.cell * 2.92f, m.cell * 1.48f)
+        drawRoundRect(
+            Color(0xFFFFC21A).copy(alpha = 0.22f + 0.18f * pulse),
+            topLeft,
+            box,
+            CornerRadius(m.cell * 0.3f)
+        )
+        for (k in 1..3) {
+            val grow = m.cell * 0.09f * k
+            drawRoundRect(
+                Color(0xFFFFD54A).copy(alpha = 0.16f + 0.10f * pulse - 0.04f * k),
+                Offset(topLeft.x - grow, topLeft.y - grow),
+                Size(box.width + grow * 2f, box.height + grow * 2f),
+                CornerRadius(m.cell * (0.3f + 0.09f * k)),
+                style = Stroke(m.cell * 0.07f)
+            )
+        }
+        drawRoundRect(
+            Color(0xFFFFE27A).copy(alpha = 0.75f + 0.25f * pulse),
+            topLeft,
+            box,
+            CornerRadius(m.cell * 0.3f),
+            style = Stroke(m.cell * 0.10f)
+        )
+    }
 
     if (rollHint) {
         // Soft pulsing frame around the dice: tap them to roll.
