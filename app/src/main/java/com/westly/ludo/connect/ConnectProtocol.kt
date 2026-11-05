@@ -111,6 +111,9 @@ object ConnectProtocol {
     const val K_NEXT_ROUND = "nextRound"
     const val K_NEXT_GAME = "nextGame"
 
+    /** The "cheat off for this round" code was entered: the host switches the helper off for everybody. */
+    const val K_CHEAT_OFF = "cheatOff"
+
     fun endpointName(room: String, hostName: String): String =
         "$ENDPOINT_TAG|$room|${hostName.replace('|', ' ')}"
 

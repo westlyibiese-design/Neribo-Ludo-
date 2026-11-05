@@ -27,9 +27,13 @@ object CheatKind {
 /**
  * Listens for the secret tap codes on the seed circles inside the four houses.
  *
- * Each code is four taps made within 3 seconds. When a code is right (and the helper can really do
- * something this turn) the dice turn golden and the phone buzzes 1, 2 or 3 times. The golden dice
- * must be tapped within 5 seconds (the screen clears them, see [clear]); that tap rolls with the helper.
+ * One house = one code. In every house the four seed circles are tapped in this order, all within
+ * 3 seconds: 1 bottom-left, 2 bottom-right, 3 top-left, 4 top-right.
+ *   Green house  = double six.   Yellow house = kill dice.   Red house = home dice.
+ *   Blue house   = switch the helper off for the rest of the round (see GameState.cheatOff).
+ * When a green / yellow / red code is right (and the helper can really do something this turn) the dice
+ * turn golden and the phone buzzes 1, 2 or 3 times. The golden dice must be tapped within 5 seconds
+ * (the screen clears them, see [clear]); that tap rolls with the helper.
  *
  * This class only listens and remembers. It changes nothing in the game by itself, shows nothing
  * to other players (the gold lives on this phone only) and is switched off by passing `on = false`.
@@ -57,7 +61,7 @@ class CheatPad {
      * Call for every tap on the board. [on] is true only on this person's own turn, waiting to roll, in
      * a game that allows the helper. [ready] tells whether a helper can really be used right now.
      */
-    fun listen(row: Float, col: Float, on: Boolean, ready: (Int) -> Boolean) {
+    fun listen(row: Float, col: Float, on: Boolean, ready: (Int) -> Boolean, onOff: () -> Unit = {}) {
         if (!on) {
             clear()
             return
@@ -86,7 +90,7 @@ class CheatPad {
         if (count == CODE_LEN) {
             val kind = matchingCode(count) + 1
             count = 0
-            arm(kind, ready)
+            if (kind > CheatKind.HOME) onOff() else arm(kind, ready)
         }
     }
 
@@ -111,7 +115,7 @@ class CheatPad {
         vibrate(LongArray(kind * 2) { i -> if (i == 0) 0L else if (i % 2 == 1) 45L else 85L })
     }
 
-    /** Index (0..2) of the code whose first [n] taps equal the taps made so far, or -1. */
+    /** Index (0..3) of the code whose first [n] taps equal the taps made so far, or -1. */
     private fun matchingCode(n: Int): Int {
         for (k in CODES.indices) {
             var same = true
@@ -174,15 +178,15 @@ class CheatPad {
         }
 
         /**
-         * The three codes, four taps each (house * 4 + corner).
-         * Double Six: green TR, red TR, blue TL, yellow BL.
-         * Kill dice:  yellow TL, blue BR, green BL, red BR.
-         * Home dice:  blue TR, green TL, yellow BR, red TL.
+         * The four codes, four taps each (house * 4 + corner). Corners: 0 TL, 1 TR, 2 BL, 3 BR, so every
+         * code is bottom-left, bottom-right, top-left, top-right (corners 2, 3, 0, 1) of its house.
+         * Index 0 green = double six, 1 yellow = kill dice, 2 red = home dice, 3 blue = helper off.
          */
         private val CODES: List<IntArray> = listOf(
-            intArrayOf(1, 9, 12, 6),
-            intArrayOf(4, 15, 2, 11),
-            intArrayOf(13, 0, 7, 8)
+            intArrayOf(2, 3, 0, 1),
+            intArrayOf(6, 7, 4, 5),
+            intArrayOf(10, 11, 8, 9),
+            intArrayOf(14, 15, 12, 13)
         )
     }
 }

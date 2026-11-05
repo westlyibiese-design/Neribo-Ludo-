@@ -766,6 +766,7 @@ class LudoGame(
             o.put("tieFlicker", tieFlicker)
             o.put("bannerSeq", bannerSeq)
         }
+        o.put("cheatOff", cheatOff)
         return o
     }
 
@@ -874,6 +875,7 @@ class LudoGame(
         bonusRoll = bonus
         pick = newPick
         pendingMover = newPending
+        cheatOff = o.optBoolean("cheatOff", false)
         if (tournament) {
             for (i in 0 until 4) active[i] = tActive[i] != 0
             round = tRound
@@ -1075,6 +1077,7 @@ class LudoGame(
         winner = -1
         bonusRoll = false
         cheatSixPlayer = -1
+        cheatOff = false
         die1 = 0
         die2 = 0
         used1 = false
@@ -1421,7 +1424,20 @@ class LudoGame(
     /** The player whose last roll was a helper double six, or -1. That player's next roll cannot be one. */
     private var cheatSixPlayer = -1
 
+    /**
+     * True after somebody entered the "cheat off" code: no helper works for everybody until the round
+     * ends (resetRound clears it). Copied to the other phones in the mirror, so it holds for them too.
+     */
+    var cheatOff by mutableStateOf(false)
+        private set
+
+    /** Switches the helper off for the rest of this round. */
+    fun disableCheat() {
+        cheatOff = true
+    }
+
     private fun cheatAllowed(cheat: Int): Boolean {
+        if (cheatOff) return false
         if (cheat < CheatKind.SIX || cheat > CheatKind.HOME) return false
         if (family || isComputerTurn) return false
         if (cheat == CheatKind.SIX && cheatSixPlayer == activePlayer) return false

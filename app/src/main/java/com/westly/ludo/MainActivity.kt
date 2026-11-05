@@ -646,9 +646,16 @@ fun LudoScreen(
     // It listens only on this person's own turn, waiting to roll, and never in Family (one shared phone).
     val cheatPad = remember(game) { CheatPad() }
     val cheatOn: () -> Boolean = {
-        !game.family && !game.bannerPending && game.overlay == TOverlay.NONE &&
+        !game.family && !game.cheatOff && !game.bannerPending && game.overlay == TOverlay.NONE &&
             game.phase == Phase.AwaitRoll && dialog == "none" &&
             (if (cs != null) (cs.myPlayer >= 0 && cs.canAct()) else (!game.isComputerTurn && game.activePlayer == 0))
+    }
+    var cheatToast by remember(game) { mutableStateOf(false) }
+    LaunchedEffect(cheatToast) {
+        if (cheatToast) {
+            delay(2000)
+            cheatToast = false
+        }
     }
     val cheatActive = cheatOn()
     LaunchedEffect(cheatActive) { if (!cheatActive) cheatPad.clear() }
@@ -806,7 +813,11 @@ fun LudoScreen(
                         val kind = if (helperOn && row in 6f..9f && col in 6f..9f) {
                             cheatPad.takeForRoll()
                         } else {
-                            cheatPad.listen(row, col, helperOn) { k -> game.cheatReady(k) }
+                            cheatPad.listen(row, col, helperOn, { k -> game.cheatReady(k) }) {
+                                // Blue house code: helper off for the rest of this round, on every phone.
+                                if (cs != null) cs.tapCheatOff() else game.disableCheat()
+                                cheatToast = true
+                            }
                             0
                         }
                         if (kind != 0) {
@@ -911,6 +922,14 @@ fun LudoScreen(
                         if (watchers > 0) ConnectNotice("Watching: $watchers", u)
                     }
                 }
+            }
+
+            // The only place the game ever mentions the helper: a small pill for 2 seconds, on the phone that switched it off.
+            if (cheatToast) {
+                ConnectNotice(
+                    "Cheat Deactivated", u,
+                    Modifier.align(Alignment.TopCenter).padding(top = boardTop + boardSide - u * 9f)
+                )
             }
 
             // Round banner: fades in and out over the board, takes no taps.

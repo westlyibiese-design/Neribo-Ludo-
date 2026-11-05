@@ -334,6 +334,12 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         act(HostIntent(mySeat, ConnectProtocol.K_ROLL, cheat = cheat), ConnectProtocol.intentRoll(cheat))
     }
 
+    /** The "cheat off" code: the host switches the helper off for everybody until this round ends. */
+    override fun tapCheatOff() {
+        if (!canAct() || game?.phase != Phase.AwaitRoll) return
+        act(HostIntent(mySeat, ConnectProtocol.K_CHEAT_OFF), ConnectProtocol.intent(ConnectProtocol.K_CHEAT_OFF))
+    }
+
     override fun tapDie(i: Int) {
         if (!canAct() || game?.phase != Phase.Choose || i !in 0..2) return
         act(
@@ -856,6 +862,7 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
         val seat = seatByEndpoint[endpointId] ?: return
         val intent = when (msg.optString("kind", "")) {
             ConnectProtocol.K_ROLL -> HostIntent(seat, ConnectProtocol.K_ROLL, cheat = msg.optInt("cheat", 0).coerceIn(0, 3))
+            ConnectProtocol.K_CHEAT_OFF -> HostIntent(seat, ConnectProtocol.K_CHEAT_OFF)
             ConnectProtocol.K_TIE_ROLL -> HostIntent(seat, ConnectProtocol.K_TIE_ROLL)
             ConnectProtocol.K_NEXT_ROUND -> HostIntent(seat, ConnectProtocol.K_NEXT_ROUND)
             ConnectProtocol.K_NEXT_GAME -> HostIntent(seat, ConnectProtocol.K_NEXT_GAME)
@@ -933,6 +940,8 @@ class ConnectSession(context: Context, private val prefs: SharedPreferences) : C
                     announceHand(req.seat, player, HandTarget.Dice, g.firstColorOf(player), true)
                     g.roll(req.cheat)
                 }
+            ConnectProtocol.K_CHEAT_OFF ->
+                if (myTurn && g.phase == Phase.AwaitRoll) g.disableCheat()
             ConnectProtocol.K_SELECT_DIE ->
                 if (myTurn && g.phase == Phase.Choose && req.i in 0..2) {
                     if (g.optionUsable(req.i)) {

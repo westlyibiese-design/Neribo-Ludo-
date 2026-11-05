@@ -96,6 +96,10 @@ interface LiveSession {
         tapBoard(7f, 7f)
     }
 
+    /** The "cheat off" code was entered: ask the host to switch the helper off for the rest of this round. */
+    fun tapCheatOff() {
+    }
+
     /** A tap on a pawn in the pick pop-up. */
     fun tapPiece(tag: Any?)
 
